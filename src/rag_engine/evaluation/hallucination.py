@@ -26,7 +26,7 @@ def score_grounding(answer: str, documents: list[Document]) -> tuple[float, list
 
     if term_score < 0.35:
         warnings.append("low_context_overlap")
-    if citation_score < 0.5:
+    if citation_score == 0.0:
         warnings.append("missing_citations")
     if hallucination_risk > 0.5:
         warnings.append("high_uncertainty_language")
@@ -37,14 +37,14 @@ def score_grounding(answer: str, documents: list[Document]) -> tuple[float, list
 def verify_answer_confidence(answer: str, documents: list[Document]) -> dict[str, float | bool]:
     """Return detailed confidence metrics for the answer."""
     score, warnings = score_grounding(answer, documents)
-    has_citations = "[" in answer and "]" in answer
-    has_uncertainty = _detect_uncertain_language(answer) > 0.5
+    has_citations = _check_citations(answer) > 0.0
+    uncertainty_level = _detect_uncertain_language(answer)
 
     return {
         "grounding_score": score,
-        "is_confident": score >= 0.6 and has_citations and not has_uncertainty,
+        "is_confident": score >= 0.6 and has_citations and uncertainty_level <= 0.5,
         "has_citations": has_citations,
-        "uncertainty_level": _detect_uncertain_language(answer),
+        "uncertainty_level": uncertainty_level,
         "warnings": warnings,
     }
 
@@ -102,4 +102,3 @@ def _detect_uncertain_language(answer: str) -> float:
     lower = answer.lower()
     matches = sum(1 for marker in uncertain_markers if marker in lower)
     return min(matches / 5.0, 1.0)
-
