@@ -3,6 +3,10 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      APP_ENV: container
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: http://ollama:11434
     ports:
       - "8000:8000"
     depends_on:
@@ -29,4 +33,3 @@ services:
 volumes:
   qdrant_storage:
   ollama_models:
-
