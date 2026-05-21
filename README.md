@@ -51,51 +51,66 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 
 ## Quick Start
 
+### Option A: Docker Compose (recommended)
+
 1. Create an environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Start local services:
+2. Start the full stack (API, Qdrant, Ollama):
 
 ```bash
-docker compose up -d qdrant ollama
+docker compose up -d
 ```
 
-3. Pull local models:
+The API container starts immediately; the Qdrant collection is created
+on first ingest, and the LLM connection is established lazily on the
+first `/query` call.
+
+3. Pull local models into the Ollama container:
 
 ```bash
-ollama pull llama3.1:8b
-ollama pull mistral:7b
+docker compose exec ollama ollama pull llama3.1:8b
+docker compose exec ollama ollama pull mistral:7b
 ```
 
-4. Install Python dependencies:
+4. Drop documents in `data/raw/` (the directory is bind-mounted into the
+   API container), then trigger ingestion:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+curl -X POST http://localhost:8000/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"source_path":"data/raw"}'
 ```
 
-5. Ingest documents:
-
-```bash
-rag-ingest --source data/raw
-```
-
-6. Run the API:
-
-```bash
-uvicorn rag_engine.api.main:app --reload
-```
-
-7. Ask a question:
+5. Ask a question:
 
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question":"What are the main themes in the ingested documents?"}'
+```
+
+### Option B: Local Python (no API container)
+
+1. Start infrastructure only:
+
+```bash
+docker compose up -d qdrant ollama
+docker compose exec ollama ollama pull llama3.1:8b
+docker compose exec ollama ollama pull mistral:7b
+```
+
+2. Install the package and run the API on the host:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+rag-ingest --source data/raw
+uvicorn rag_engine.api.main:app --reload
 ```
 
 ## Deployment Notes
