@@ -12,6 +12,13 @@ services:
     depends_on:
       - qdrant
       - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
     volumes:
       - ./data:/app/data
 
@@ -22,6 +29,7 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
 
   ollama:
     image: ollama/ollama:0.3.6
@@ -29,6 +37,7 @@ services:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
+    restart: unless-stopped
 
 volumes:
   qdrant_storage:
