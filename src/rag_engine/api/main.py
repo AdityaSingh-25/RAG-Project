@@ -14,7 +14,15 @@ settings = get_settings()
 configure_tracing(settings)
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
-graph = build_graph(settings)
+
+_graph = None
+
+
+def _get_graph():
+    global _graph
+    if _graph is None:
+        _graph = build_graph(settings)
+    return _graph
 
 
 class QueryRequest(BaseModel):
@@ -33,6 +41,10 @@ def health() -> dict[str, str]:
 
 @app.post("/query")
 def query(request: QueryRequest) -> dict[str, Any]:
+    try:
+        graph = _get_graph()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
     result = graph.invoke(
         {
             "question": request.question,
@@ -66,4 +78,3 @@ def run() -> None:
 
 
 handler = app
-
