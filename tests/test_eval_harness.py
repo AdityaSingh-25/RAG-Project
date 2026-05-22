@@ -81,13 +81,16 @@ def test_evaluate_dataset_aggregates_metrics() -> None:
 
 def test_format_outputs_are_valid() -> None:
     cases = [EvalCase(id="a", question="Q1", expected_terms=("alpha",))]
-    runner = lambda q: {
-        "answer": "alpha [1].",
-        "citations": [],
-        "grounding_score": 0.9,
-        "warnings": [],
-        "iteration": 0,
-    }
+
+    def runner(_q: str) -> dict:
+        return {
+            "answer": "alpha [1].",
+            "citations": [],
+            "grounding_score": 0.9,
+            "warnings": [],
+            "iteration": 0,
+        }
+
     report = evaluate_dataset(cases, runner)
     parsed = json.loads(format_json(report))
     assert parsed["aggregate"]["n"] == 1.0
