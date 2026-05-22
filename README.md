@@ -93,6 +93,20 @@ curl -X POST http://localhost:8000/query \
   -d '{"question":"What are the main themes in the ingested documents?"}'
 ```
 
+The response includes an `iteration` field showing how many feedback-loop
+retries the critic triggered (0 when the first answer met the grounding
+threshold).
+
+6. Evaluate the engine against a JSONL of cases:
+
+```bash
+rag-eval --cases data/eval/seed_cases.jsonl --format markdown
+```
+
+Customize `data/eval/seed_cases.jsonl` for your own corpus before running.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the case schema and
+the feedback-loop semantics.
+
 ### Option B: Local Python (no API container)
 
 1. Start infrastructure only:
@@ -126,6 +140,9 @@ The default setup uses local providers:
 - `CHAT_MODEL_REASONING=llama3.1:8b`
 - `EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`
 - `QDRANT_URL=http://localhost:6333`
+- `ENABLE_FEEDBACK_LOOP=true` (set to `false` to keep the legacy linear pipeline)
+- `GROUNDING_THRESHOLD=0.6` (minimum score to skip the rewrite-and-retry loop)
+- `MAX_RETRY_ITERATIONS=1` (hard cap on feedback-loop iterations per query)
 
 LangSmith is optional. Enable it only if you want hosted tracing.
 

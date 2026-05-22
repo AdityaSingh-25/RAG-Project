@@ -48,12 +48,14 @@ def query(request: QueryRequest) -> dict[str, Any]:
     result = graph.invoke(
         {
             "question": request.question,
+            "original_question": request.question,
             "filters": request.filters or {},
             "documents": [],
             "answer": "",
             "citations": [],
             "grounding_score": 0.0,
             "warnings": [],
+            "iteration": 0,
         }
     )
     return {
@@ -61,6 +63,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
         "citations": result["citations"],
         "grounding_score": result["grounding_score"],
         "warnings": result["warnings"],
+        "iteration": result.get("iteration", 0),
     }
 
 
