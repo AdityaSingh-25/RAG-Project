@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     top_k: int = Field(default=6, ge=1, le=25)
     max_context_tokens: int = Field(default=6000, ge=1000)
 
+    enable_feedback_loop: bool = True
+    grounding_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    max_retry_iterations: int = Field(default=1, ge=0, le=3)
+
     langchain_tracing_v2: bool = False
     langchain_project: str = "rag-multi-agent-engine"
     langchain_api_key: str | None = None

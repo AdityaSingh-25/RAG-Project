@@ -1,0 +1,10 @@
+# Seed eval cases. One JSON object per line. Comments (lines starting with #) are ignored.
+# Schema: {"id": str, "question": str, "must_cite": [source-substring,...], "expected_terms": [term,...]}
+# - must_cite entries are matched as substrings against citation `source` fields.
+# - expected_terms must appear as whole words in the answer (case-insensitive).
+# Customize these cases for your own ingested corpus before running `rag-eval`.
+{"id": "001", "question": "What vector database does this project use for semantic search?", "must_cite": [], "expected_terms": ["Qdrant"]}
+{"id": "002", "question": "Which local model runtime serves the LLMs?", "must_cite": [], "expected_terms": ["Ollama"]}
+{"id": "003", "question": "What embedding model is used by default?", "must_cite": [], "expected_terms": ["sentence-transformers", "MiniLM"]}
+{"id": "004", "question": "How are answers checked for hallucinations?", "must_cite": [], "expected_terms": ["grounding"]}
+{"id": "005", "question": "What framework orchestrates the multi-agent workflow?", "must_cite": [], "expected_terms": ["LangGraph"]}

@@ -4,10 +4,25 @@ from langgraph.graph import END, StateGraph
 from rag_engine.agents.state import AgentState
 from rag_engine.config.settings import Settings
 from rag_engine.evaluation.hallucination import verify_answer_confidence
+from rag_engine.retrieval.query_rewriter import rewrite_query
 from rag_engine.retrieval.retriever import build_retriever
 from rag_engine.retrieval.reranker import rerank_documents
 from rag_engine.routing.model_router import ModelRouter
 from rag_engine.utils.tokenization import count_tokens
+
+
+def should_retry(state: AgentState, settings: Settings) -> str:
+    """Decide whether the critic loop should retry retrieval or terminate.
+
+    Returns the next node name: "rewrite" to loop, or END to stop.
+    """
+    if not settings.enable_feedback_loop:
+        return END
+    if state.get("iteration", 0) >= settings.max_retry_iterations:
+        return END
+    if state.get("grounding_score", 0.0) >= settings.grounding_threshold:
+        return END
+    return "rewrite"
 
 
 def build_graph(settings: Settings):
@@ -38,14 +53,29 @@ def build_graph(settings: Settings):
         warnings = confidence["warnings"]
         return {**state, "grounding_score": score, "warnings": warnings}
 
+    def rewrite(state: AgentState) -> AgentState:
+        original = state.get("original_question") or state["question"]
+        rewritten = rewrite_query(original, state.get("documents", []))
+        return {
+            **state,
+            "question": rewritten,
+            "iteration": state.get("iteration", 0) + 1,
+        }
+
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("answer", answer)
     workflow.add_node("critique", critique)
+    workflow.add_node("rewrite", rewrite)
     workflow.set_entry_point("retrieve")
     workflow.add_edge("retrieve", "answer")
     workflow.add_edge("answer", "critique")
-    workflow.add_edge("critique", END)
+    workflow.add_conditional_edges(
+        "critique",
+        lambda state: should_retry(state, settings),
+        {"rewrite": "rewrite", END: END},
+    )
+    workflow.add_edge("rewrite", "retrieve")
     return workflow.compile()
 
 
@@ -80,4 +110,3 @@ def _citation(document: Document, index: int) -> dict[str, object]:
         "page": document.metadata.get("page"),
         "score": document.metadata.get("score"),
     }
-

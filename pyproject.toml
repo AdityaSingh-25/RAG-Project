@@ -42,6 +42,7 @@ dev = [
 [project.scripts]
 rag-api = "rag_engine.api.main:run"
 rag-ingest = "rag_engine.cli:ingest_command"
+rag-eval = "rag_engine.cli:eval_command"
 
 [tool.setuptools.packages.find]
 where = ["src"]
