@@ -56,6 +56,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
             "grounding_score": 0.0,
             "warnings": [],
             "iteration": 0,
+            "status": "",
         }
     )
     return {
@@ -64,6 +65,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
         "grounding_score": result["grounding_score"],
         "warnings": result["warnings"],
         "iteration": result.get("iteration", 0),
+        "status": result.get("status") or "ok",
     }
 
 

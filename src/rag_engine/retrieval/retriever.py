@@ -1,14 +1,39 @@
-from langchain_core.vectorstores import VectorStoreRetriever
+from pathlib import Path
+from typing import Protocol
+
+from langchain_core.documents import Document
 
 from rag_engine.config.settings import Settings
+from rag_engine.retrieval.bm25_store import load_bm25_index
+from rag_engine.retrieval.hybrid import HybridRetriever
 from rag_engine.vectorstore.qdrant_store import build_vectorstore
 
 
-def build_retriever(settings: Settings) -> VectorStoreRetriever:
+class Retriever(Protocol):
+    def invoke(self, query: str) -> list[Document]: ...
+
+
+def build_retriever(settings: Settings) -> Retriever:
+    """Build a retriever according to ``settings.retrieval_mode``.
+
+    - ``dense``: vector-only retrieval from Qdrant.
+    - ``hybrid``: dense + BM25 fused with Reciprocal Rank Fusion. Falls back
+      to dense-only when the BM25 index is absent (e.g., no ingest has run yet).
+    """
     vectorstore = build_vectorstore(
         qdrant_url=settings.qdrant_url,
         collection_name=settings.qdrant_collection,
         embedding_model=settings.embedding_model,
     )
-    return vectorstore.as_retriever(search_kwargs={"k": settings.top_k})
+    dense = vectorstore.as_retriever(search_kwargs={"k": settings.top_k})
 
+    if settings.retrieval_mode == "dense":
+        return dense
+
+    bm25_index = load_bm25_index(Path(settings.bm25_index_path))
+    return HybridRetriever(
+        dense=dense,
+        bm25_index=bm25_index,
+        top_k=settings.top_k,
+        rrf_k=settings.rrf_k,
+    )

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     enable_feedback_loop: bool = True
     grounding_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     max_retry_iterations: int = Field(default=1, ge=0, le=3)
+
+    retrieval_mode: Literal["dense", "hybrid"] = "hybrid"
+    bm25_index_path: str = "data/processed/bm25_index.pkl"
+    rrf_k: int = Field(default=60, ge=1)
+
+    eval_baseline_grounding: float = Field(default=0.0, ge=0.0, le=1.0)
 
     langchain_tracing_v2: bool = False
     langchain_project: str = "rag-multi-agent-engine"

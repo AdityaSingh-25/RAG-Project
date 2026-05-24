@@ -24,6 +24,7 @@ dependencies = [
   "qdrant-client>=1.11.0",
   "sentence-transformers>=3.0.1",
   "tiktoken>=0.7.0",
+  "rank-bm25>=0.2.2",
   "jq>=1.8.0",
   "pypdf>=4.3.0",
   "python-multipart>=0.0.9",
