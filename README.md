@@ -9,6 +9,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - Embeddings stored in Qdrant for semantic retrieval.
 - LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
+- Two-stage retrieval with a neural cross-encoder reranker as the second stage.
 - Model routing and token budgeting across local models served by Ollama.
 - FastAPI service for ingestion, querying, health checks, and evaluation hooks.
 - Docker Compose for local infrastructure and CI-ready Docker build.
@@ -150,6 +151,9 @@ The default setup uses local providers:
 - `RETRIEVAL_MODE=hybrid` (`dense` to disable BM25 fusion)
 - `BM25_INDEX_PATH=data/processed/bm25_index.pkl` (rebuilt on every ingest)
 - `RRF_K=60` (Reciprocal Rank Fusion constant)
+- `RETRIEVE_K=20` (first-stage candidate pool, narrowed to `TOP_K` by the reranker)
+- `RERANKER_MODE=cross_encoder` (`keyword` for the term-overlap heuristic, `disabled` to skip reranking entirely)
+- `CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, downloaded on first use)
 - `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor; raise to gate on regressions)
 
 LangSmith is optional. Enable it only if you want hosted tracing.

@@ -19,13 +19,17 @@ def build_retriever(settings: Settings) -> Retriever:
     - ``dense``: vector-only retrieval from Qdrant.
     - ``hybrid``: dense + BM25 fused with Reciprocal Rank Fusion. Falls back
       to dense-only when the BM25 index is absent (e.g., no ingest has run yet).
+
+    First-stage retrieval fetches ``settings.retrieve_k`` candidates so the
+    downstream reranker has a meaningful pool to choose from before narrowing
+    to ``settings.top_k``.
     """
     vectorstore = build_vectorstore(
         qdrant_url=settings.qdrant_url,
         collection_name=settings.qdrant_collection,
         embedding_model=settings.embedding_model,
     )
-    dense = vectorstore.as_retriever(search_kwargs={"k": settings.top_k})
+    dense = vectorstore.as_retriever(search_kwargs={"k": settings.retrieve_k})
 
     if settings.retrieval_mode == "dense":
         return dense
@@ -34,6 +38,6 @@ def build_retriever(settings: Settings) -> Retriever:
     return HybridRetriever(
         dense=dense,
         bm25_index=bm25_index,
-        top_k=settings.top_k,
+        top_k=settings.retrieve_k,
         rrf_k=settings.rrf_k,
     )

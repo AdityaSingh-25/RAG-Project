@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=900, ge=200)
     chunk_overlap: int = Field(default=120, ge=0)
     top_k: int = Field(default=6, ge=1, le=25)
+    retrieve_k: int = Field(default=20, ge=1, le=100)
     max_context_tokens: int = Field(default=6000, ge=1000)
+
+    reranker_mode: Literal["keyword", "cross_encoder", "disabled"] = "cross_encoder"
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     enable_feedback_loop: bool = True
     grounding_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
