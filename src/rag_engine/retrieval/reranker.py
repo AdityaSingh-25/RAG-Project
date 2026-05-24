@@ -2,6 +2,31 @@ import re
 
 from langchain_core.documents import Document
 
+from rag_engine.config.settings import Settings
+from rag_engine.retrieval.cross_encoder_reranker import rerank_with_cross_encoder
+
+
+def apply_reranker(
+    question: str, documents: list[Document], settings: Settings
+) -> list[Document]:
+    """Dispatch to the configured reranker and return the top ``settings.top_k`` docs.
+
+    - ``cross_encoder`` (default): neural cross-encoder over the candidate pool.
+    - ``keyword``: term-overlap heuristic; no model download required.
+    - ``disabled``: passthrough, truncating to ``top_k``.
+    """
+    mode = settings.reranker_mode
+    if mode == "disabled":
+        return list(documents[: settings.top_k])
+    if mode == "cross_encoder":
+        return rerank_with_cross_encoder(
+            question,
+            documents,
+            top_k=settings.top_k,
+            model_name=settings.cross_encoder_model,
+        )
+    return rerank_documents(question, documents, top_k=settings.top_k)
+
 
 def rerank_documents(
     question: str, documents: list[Document], top_k: int = 6

@@ -52,6 +52,27 @@ default; smaller values weight top ranks more aggressively. If the BM25
 index is missing (no ingest has run yet), the retriever falls back to dense
 only. Switch back to `RETRIEVAL_MODE=dense` to disable BM25 entirely.
 
+## Two-Stage Retrieval and Reranking
+
+Retrieval is split into a cheap first stage and an accurate second stage:
+
+1. **Candidate pool** — the hybrid retriever returns `RETRIEVE_K` documents
+   (default 20). This is the recall stage; we want it wide enough that the
+   right answer is somewhere in the pool.
+2. **Rerank** — `apply_reranker` narrows the pool to `TOP_K` (default 6)
+   using whichever reranker is configured by `RERANKER_MODE`:
+   - `cross_encoder` (default): neural cross-encoder
+     (`cross-encoder/ms-marco-MiniLM-L-6-v2` by default), loaded lazily and
+     cached for the life of the process. Reads each `(question, passage)`
+     pair jointly, which is strictly more accurate than dot-product of
+     independent embeddings but ~3-5x slower — bearable because it runs
+     only over the small candidate pool, not the corpus.
+   - `keyword`: term-overlap heuristic. No model download.
+   - `disabled`: passthrough; truncates to `TOP_K`.
+
+Each reranked document carries the raw score in `metadata["rerank_score"]`
+so downstream code (and the eval harness) can inspect ranking decisions.
+
 ## Evaluation Harness
 
 `rag-eval` (or `python -m rag_engine.cli eval_command`) runs a JSONL of cases

@@ -5,8 +5,8 @@ from rag_engine.agents.state import AgentState
 from rag_engine.config.settings import Settings
 from rag_engine.evaluation.hallucination import verify_answer_confidence
 from rag_engine.retrieval.query_rewriter import rewrite_query
+from rag_engine.retrieval.reranker import apply_reranker
 from rag_engine.retrieval.retriever import build_retriever
-from rag_engine.retrieval.reranker import rerank_documents
 from rag_engine.routing.model_router import ModelRouter
 from rag_engine.utils.tokenization import count_tokens
 
@@ -44,7 +44,7 @@ def build_graph(settings: Settings):
 
     def retrieve(state: AgentState) -> AgentState:
         documents = retriever.invoke(state["question"])
-        reranked = rerank_documents(state["question"], documents, top_k=settings.top_k)
+        reranked = apply_reranker(state["question"], documents, settings)
         return {**state, "documents": reranked}
 
     def answer(state: AgentState) -> AgentState:
