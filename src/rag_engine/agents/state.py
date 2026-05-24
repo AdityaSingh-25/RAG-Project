@@ -13,4 +13,5 @@ class AgentState(TypedDict):
     grounding_score: float
     warnings: list[str]
     iteration: int
+    status: str
 

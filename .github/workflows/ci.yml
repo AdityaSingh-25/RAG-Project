@@ -22,6 +22,10 @@ jobs:
         run: ruff check src tests
       - name: Test
         run: pytest
+      - name: Eval gate
+        env:
+          EVAL_BASELINE_GROUNDING: "0.5"
+        run: python scripts/eval_ci.py
       - name: Docker build
         run: docker build -t rag-engine:ci .
 

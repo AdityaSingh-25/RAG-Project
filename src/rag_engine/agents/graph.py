@@ -11,18 +11,31 @@ from rag_engine.routing.model_router import ModelRouter
 from rag_engine.utils.tokenization import count_tokens
 
 
-def should_retry(state: AgentState, settings: Settings) -> str:
-    """Decide whether the critic loop should retry retrieval or terminate.
+INSUFFICIENT_EVIDENCE_MESSAGE = (
+    "Insufficient evidence to answer confidently from the retrieved context."
+)
 
-    Returns the next node name: "rewrite" to loop, or END to stop.
+
+def route_after_critique(state: AgentState, settings: Settings) -> str:
+    """Decide what happens after the critic runs.
+
+    Returns the next node name: ``"rewrite"`` to loop, ``"fallback"`` to refuse,
+    or ``END`` when the answer is good enough to ship.
     """
-    if not settings.enable_feedback_loop:
+    score = state.get("grounding_score", 0.0)
+    iteration = state.get("iteration", 0)
+    threshold = settings.grounding_threshold
+
+    if score >= threshold:
         return END
-    if state.get("iteration", 0) >= settings.max_retry_iterations:
-        return END
-    if state.get("grounding_score", 0.0) >= settings.grounding_threshold:
-        return END
-    return "rewrite"
+
+    can_retry = (
+        settings.enable_feedback_loop
+        and iteration < settings.max_retry_iterations
+    )
+    if can_retry:
+        return "rewrite"
+    return "fallback"
 
 
 def build_graph(settings: Settings):
@@ -62,20 +75,46 @@ def build_graph(settings: Settings):
             "iteration": state.get("iteration", 0) + 1,
         }
 
+    def fallback(state: AgentState) -> AgentState:
+        reason = (
+            "no_retrieved_context"
+            if not state.get("documents")
+            else "low_grounding_after_retry"
+        )
+        warnings = list(state.get("warnings", []))
+        if reason not in warnings:
+            warnings.append(reason)
+        return {
+            **state,
+            "answer": INSUFFICIENT_EVIDENCE_MESSAGE,
+            "citations": [],
+            "status": "insufficient_evidence",
+            "warnings": warnings,
+        }
+
+    def finalize_ok(state: AgentState) -> AgentState:
+        if state.get("status"):
+            return state
+        return {**state, "status": "ok"}
+
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("answer", answer)
     workflow.add_node("critique", critique)
     workflow.add_node("rewrite", rewrite)
+    workflow.add_node("fallback", fallback)
+    workflow.add_node("finalize", finalize_ok)
     workflow.set_entry_point("retrieve")
     workflow.add_edge("retrieve", "answer")
     workflow.add_edge("answer", "critique")
     workflow.add_conditional_edges(
         "critique",
-        lambda state: should_retry(state, settings),
-        {"rewrite": "rewrite", END: END},
+        lambda state: route_after_critique(state, settings),
+        {"rewrite": "rewrite", "fallback": "fallback", END: "finalize"},
     )
     workflow.add_edge("rewrite", "retrieve")
+    workflow.add_edge("fallback", END)
+    workflow.add_edge("finalize", END)
     return workflow.compile()
 
 

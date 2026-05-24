@@ -7,7 +7,8 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - Document ingestion for PDFs, Markdown, text, CSV, JSON, and web-ready sources.
 - Semantic chunking with metadata preservation.
 - Embeddings stored in Qdrant for semantic retrieval.
-- LangGraph multi-agent workflow for query planning, retrieval, answer synthesis, and self-checking.
+- LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
+- Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Model routing and token budgeting across local models served by Ollama.
 - FastAPI service for ingestion, querying, health checks, and evaluation hooks.
 - Docker Compose for local infrastructure and CI-ready Docker build.
@@ -95,7 +96,10 @@ curl -X POST http://localhost:8000/query \
 
 The response includes an `iteration` field showing how many feedback-loop
 retries the critic triggered (0 when the first answer met the grounding
-threshold).
+threshold) and a `status` field that is `"ok"` when the critic was
+satisfied or `"insufficient_evidence"` when the retry budget was exhausted
+without clearing the grounding threshold — in that case `answer` is a
+structured refusal rather than a fabricated response.
 
 6. Evaluate the engine against a JSONL of cases:
 
@@ -143,6 +147,10 @@ The default setup uses local providers:
 - `ENABLE_FEEDBACK_LOOP=true` (set to `false` to keep the legacy linear pipeline)
 - `GROUNDING_THRESHOLD=0.6` (minimum score to skip the rewrite-and-retry loop)
 - `MAX_RETRY_ITERATIONS=1` (hard cap on feedback-loop iterations per query)
+- `RETRIEVAL_MODE=hybrid` (`dense` to disable BM25 fusion)
+- `BM25_INDEX_PATH=data/processed/bm25_index.pkl` (rebuilt on every ingest)
+- `RRF_K=60` (Reciprocal Rank Fusion constant)
+- `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor; raise to gate on regressions)
 
 LangSmith is optional. Enable it only if you want hosted tracing.
 

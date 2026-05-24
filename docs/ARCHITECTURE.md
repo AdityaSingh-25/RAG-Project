@@ -16,19 +16,41 @@
     retrieved documents and routes back to the retriever. Otherwise the run terminates.
 11. Observability hooks record latency, token estimates, routing decisions, and grounding scores.
 
-## Feedback Loop
+## Feedback Loop and Fallback
 
-The workflow uses a conditional edge from `critique`:
+The workflow uses a 3-way conditional edge from `critique`:
 
 - `critique → rewrite → retrieve → answer → critique` while
   `grounding_score < grounding_threshold` and `iteration < max_retry_iterations`.
-- `critique → END` otherwise.
+- `critique → fallback` when grounding is below threshold and the retry budget
+  is exhausted (or the loop is disabled). The fallback node replaces the
+  drafted answer with a structured "insufficient evidence" response,
+  clears citations, and sets `status = "insufficient_evidence"`. This is the
+  hallucination-prevention exit — we refuse to ship an answer the critic
+  doesn't trust.
+- `critique → finalize → END` when grounding clears the threshold; `finalize`
+  marks `status = "ok"`.
 
 `rewrite` is a deterministic pseudo-relevance-feedback step: it keeps the user's
 original question intact and appends novel high-frequency terms mined from the
 top retrieved documents. This widens the lexical surface for the next pass
 without an additional LLM call. The loop is bounded by `max_retry_iterations`
 (default 1) so a stuck query cannot spin forever.
+
+## Hybrid Retrieval
+
+The retriever defaults to `RETRIEVAL_MODE=hybrid`, which fuses two ranked
+lists via Reciprocal Rank Fusion:
+
+- **Dense**: vector search over Qdrant (semantic similarity).
+- **Sparse**: BM25 over an in-process index built alongside ingestion and
+  persisted at `BM25_INDEX_PATH` (default `data/processed/bm25_index.pkl`).
+
+RRF combines the lists with `score(doc) = Σ 1 / (rrf_k + rank_i)` across the
+lists in which the doc appears. `rrf_k = 60` matches the Cormack et al.
+default; smaller values weight top ranks more aggressively. If the BM25
+index is missing (no ingest has run yet), the retriever falls back to dense
+only. Switch back to `RETRIEVAL_MODE=dense` to disable BM25 entirely.
 
 ## Evaluation Harness
 
@@ -41,10 +63,21 @@ through the graph and reports per-case and aggregate metrics:
 - **term recall** — fraction of `expected_terms` that appear as whole words
   in the answer.
 - **iteration** — how many feedback-loop retries the case triggered.
+- **status** — `ok` or `insufficient_evidence` (also surfaced as the
+  aggregate `insufficient_evidence_rate`).
 - **latency** — wall-clock per case.
 
 The runner is injectable, so the harness can be exercised in unit tests
 without Qdrant or Ollama.
+
+## Evaluation in CI
+
+`scripts/eval_ci.py` runs the harness over `data/eval/seed_cases.jsonl` with
+a deterministic stub runner (CI doesn't have Qdrant/Ollama) and exits
+non-zero when `mean_grounding < EVAL_BASELINE_GROUNDING`. Today the gate
+catches harness regressions and malformed seed cases. When CI gains access
+to real models — or to a recorded fixture corpus — the same script can be
+pointed at a real runner to gate on actual answer quality.
 
 ## Agent Responsibilities
 
