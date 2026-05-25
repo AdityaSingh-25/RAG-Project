@@ -19,8 +19,11 @@ def ingest_command() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    count = ingest_path(Path(args.source), settings)
-    print(f"Ingested {count} chunks from {args.source}")
+    report = ingest_path(Path(args.source), settings)
+    print(
+        f"Ingested {report.indexed} chunks from {args.source} "
+        f"(deduplicated {report.duplicates_removed})"
+    )
 
 
 def _live_runner(settings):

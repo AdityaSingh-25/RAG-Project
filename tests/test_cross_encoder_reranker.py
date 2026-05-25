@@ -59,21 +59,33 @@ def test_cross_encoder_handles_empty_input() -> None:
     assert out == []
 
 
-def test_apply_reranker_disabled_truncates_only(monkeypatch) -> None:
-    settings = Settings(reranker_mode="disabled", top_k=2)
-    docs = [_doc("a"), _doc("b"), _doc("c")]
+def test_apply_reranker_disabled_does_not_load_cross_encoder(monkeypatch) -> None:
+    settings = Settings(
+        reranker_mode="disabled", top_k=2, enable_source_confidence=False
+    )
+    docs = [
+        _doc("a", rrf_score=0.3),
+        _doc("b", rrf_score=0.9),
+        _doc("c", rrf_score=0.1),
+    ]
 
-    # If anything tried to call the cross-encoder, this would raise.
-    def boom(*_a, **_k):
-        raise AssertionError("disabled mode must not invoke the cross-encoder")
+    def boom(**_kw):
+        raise AssertionError("disabled mode must not load the cross-encoder")
 
-    monkeypatch.setattr("rag_engine.retrieval.reranker.rerank_with_cross_encoder", boom)
+    monkeypatch.setattr(
+        "rag_engine.retrieval.reranker.load_cross_encoder_with_cache", boom
+    )
     out = apply_reranker("Q", docs, settings)
-    assert [d.page_content for d in out] == ["a", "b"]
+    # disabled mode now sorts by the retriever's existing score before truncating,
+    # so a high rrf_score doc rises above a low one even though the input was
+    # unsorted.
+    assert [d.page_content for d in out] == ["b", "a"]
 
 
-def test_apply_reranker_keyword_mode_uses_legacy_path() -> None:
-    settings = Settings(reranker_mode="keyword", top_k=1)
+def test_apply_reranker_keyword_mode_uses_term_overlap_path() -> None:
+    settings = Settings(
+        reranker_mode="keyword", top_k=1, enable_source_confidence=False
+    )
     docs = [
         _doc("alpha", score=0.1),
         _doc("Qdrant vector database", score=0.9),
@@ -82,33 +94,32 @@ def test_apply_reranker_keyword_mode_uses_legacy_path() -> None:
     assert out[0].page_content == "Qdrant vector database"
 
 
-def test_apply_reranker_cross_encoder_mode_calls_cross_encoder(monkeypatch) -> None:
+def test_apply_reranker_cross_encoder_mode_invokes_encoder(monkeypatch) -> None:
     settings = Settings(
         reranker_mode="cross_encoder",
         cross_encoder_model="stub-model",
         top_k=1,
         cache_enabled=False,
+        enable_source_confidence=False,
     )
-    docs = [_doc("alpha"), _doc("beta")]
+    docs = [_doc("alpha", source="a.md"), _doc("beta winner", source="b.md")]
+    encoder = _StubEncoder({"alpha": 0.1, "beta winner": 0.9})
 
     captured: dict[str, object] = {}
 
-    def fake_cross_encoder(question, documents, top_k, model_name, encoder=None):
-        captured["question"] = question
-        captured["model_name"] = model_name
-        captured["top_k"] = top_k
-        return documents[:top_k]
+    def fake_loader(**kw):
+        captured.update(kw)
+        return encoder
 
-    # apply_reranker now loads (and optionally caches) the encoder before
-    # calling rerank_with_cross_encoder, so we also need to stub the loader.
     monkeypatch.setattr(
         "rag_engine.retrieval.reranker.load_cross_encoder_with_cache",
-        lambda **_kw: _StubEncoder({}),
-    )
-    monkeypatch.setattr(
-        "rag_engine.retrieval.reranker.rerank_with_cross_encoder",
-        fake_cross_encoder,
+        fake_loader,
     )
     out = apply_reranker("Q", docs, settings)
-    assert captured == {"question": "Q", "model_name": "stub-model", "top_k": 1}
-    assert len(out) == 1
+    assert captured["model_name"] == "stub-model"
+    assert captured["cache_enabled"] is False
+    assert encoder.calls == [[("Q", "alpha"), ("Q", "beta winner")]]
+    # The highest-scoring doc rises to the top after rerank + truncation.
+    assert out[0].metadata["source"] == "b.md"
+    assert round(out[0].metadata["rerank_score"], 2) == 0.9
+    assert out[0].metadata["source_confidence"] == 1.0  # confidence disabled

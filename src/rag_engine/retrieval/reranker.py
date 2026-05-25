@@ -3,24 +3,28 @@ import re
 from langchain_core.documents import Document
 
 from rag_engine.config.settings import Settings
-from rag_engine.retrieval.cross_encoder_reranker import (
-    load_cross_encoder_with_cache,
-    rerank_with_cross_encoder,
-)
+from rag_engine.retrieval.cross_encoder_reranker import load_cross_encoder_with_cache
+from rag_engine.retrieval.source_confidence import score_source_confidence
 
 
-def apply_reranker(
+def _score_documents(
     question: str, documents: list[Document], settings: Settings
-) -> list[Document]:
-    """Dispatch to the configured reranker and return the top ``settings.top_k`` docs.
+) -> list[float]:
+    """Compute one reranker score per document. Does NOT truncate.
 
-    - ``cross_encoder`` (default): neural cross-encoder over the candidate pool.
-    - ``keyword``: term-overlap heuristic; no model download required.
-    - ``disabled``: passthrough, truncating to ``top_k``.
+    Truncation is deferred until after source-confidence multiplication so a
+    confident-but-mid-ranked doc can still rescue itself into the top_k.
     """
     mode = settings.reranker_mode
     if mode == "disabled":
-        return list(documents[: settings.top_k])
+        return [
+            float(
+                doc.metadata.get("rrf_score")
+                or doc.metadata.get("score")
+                or 0.0
+            )
+            for doc in documents
+        ]
     if mode == "cross_encoder":
         encoder = load_cross_encoder_with_cache(
             model_name=settings.cross_encoder_model,
@@ -28,14 +32,51 @@ def apply_reranker(
             cache_path=settings.cache_path,
             cache_ttl_seconds=settings.cache_ttl_seconds,
         )
-        return rerank_with_cross_encoder(
-            question,
-            documents,
-            top_k=settings.top_k,
-            model_name=settings.cross_encoder_model,
-            encoder=encoder,
+        pairs = [(question, doc.page_content) for doc in documents]
+        return [float(s) for s in encoder.predict(pairs)]
+    return [get_relevance_score(question, doc) for doc in documents]
+
+
+def apply_reranker(
+    question: str, documents: list[Document], settings: Settings
+) -> list[Document]:
+    """Score, multiply by source confidence, sort, then truncate to ``top_k``.
+
+    Three reranker modes:
+
+    - ``cross_encoder`` (default): neural cross-encoder over the candidate pool.
+    - ``keyword``: term-overlap heuristic; no model download required.
+    - ``disabled``: passthrough; preserves the retriever's order.
+
+    When ``settings.enable_source_confidence`` is true, each document's
+    reranker score is multiplied by a confidence factor (freshness + trust
+    + retriever agreement). The final ordering reflects both relevance to
+    the query and the engine's trust in the source.
+    """
+    if not documents:
+        return []
+
+    rerank_scores = _score_documents(question, documents, settings)
+    enriched: list[tuple[float, Document]] = []
+    for doc, rerank_score in zip(documents, rerank_scores):
+        confidence = score_source_confidence(doc, settings)
+        final = rerank_score * confidence
+        enriched.append(
+            (
+                final,
+                Document(
+                    page_content=doc.page_content,
+                    metadata={
+                        **doc.metadata,
+                        "rerank_score": round(rerank_score, 6),
+                        "source_confidence": round(confidence, 6),
+                        "final_score": round(final, 6),
+                    },
+                ),
+            )
         )
-    return rerank_documents(question, documents, top_k=settings.top_k)
+    enriched.sort(key=lambda pair: pair[0], reverse=True)
+    return [doc for _, doc in enriched[: settings.top_k]]
 
 
 def rerank_documents(

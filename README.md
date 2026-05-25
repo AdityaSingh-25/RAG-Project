@@ -10,6 +10,8 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
+- Source confidence scoring (freshness + glob-keyed trust weights + dense/BM25 agreement) multiplied into the reranker score so trusted sources rise in ranking.
+- Content-hash deduplication at ingest, so the same chunk appearing in multiple files isn't indexed or BM25-corpused twice.
 - Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites, and the run is rejected when too many sentences are unsupported.
 - SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
 - CI eval gate covering a happy-path dataset and an adversarial dataset, with a fixture-replay mode so real engine behavior can be checked offline.
@@ -184,6 +186,11 @@ The default setup uses local providers:
 - `RETRIEVE_K=20` (first-stage candidate pool, narrowed to `TOP_K` by the reranker)
 - `RERANKER_MODE=cross_encoder` (`keyword` for the term-overlap heuristic, `disabled` to skip reranking entirely)
 - `CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, downloaded on first use)
+- `ENABLE_INGEST_DEDUP=true` (set to `false` to keep duplicate chunks; the SHA-256 hash is still written to metadata so you can dedupe later)
+- `ENABLE_SOURCE_CONFIDENCE=true` (multiplies reranker scores by freshness × trust × agreement)
+- `FRESHNESS_HALF_LIFE_DAYS=365` (how fast a doc's freshness signal decays)
+- `AGREEMENT_BOOST=1.2` (multiplier when both dense and BM25 ranked a doc)
+- `SOURCE_WEIGHTS={}` (JSON dict mapping glob -> trust multiplier; e.g. `{"docs/**": 1.2}`)
 - `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor for `seed.mean_grounding`; raise to gate on regressions)
 - `EVAL_BASELINE_STATUS_MATCH_RATE=0.0` (CI eval gate floor for `status_match_rate` on both datasets; catches adversarial cases that stop being refused)
 - `CACHE_ENABLED=true` (set to `false` to bypass all caches)

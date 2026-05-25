@@ -96,8 +96,41 @@ Retrieval is split into a cheap first stage and an accurate second stage:
    - `keyword`: term-overlap heuristic. No model download.
    - `disabled`: passthrough; truncates to `TOP_K`.
 
-Each reranked document carries the raw score in `metadata["rerank_score"]`
-so downstream code (and the eval harness) can inspect ranking decisions.
+Each reranked document carries `metadata["rerank_score"]`,
+`metadata["source_confidence"]`, and `metadata["final_score"]` so
+downstream code (and the eval harness) can inspect ranking decisions.
+
+## Source Confidence
+
+When `ENABLE_SOURCE_CONFIDENCE=true` (default), the reranker multiplies
+its raw score by a per-document confidence factor built from three
+signals:
+
+- **freshness** — half-life decay from `metadata['published_at']` (ISO
+  date) or `metadata['mtime']` (POSIX timestamp). A doc one
+  `FRESHNESS_HALF_LIFE_DAYS` old scores 0.5; twice as old, 0.25. Missing
+  dates default to 1.0 so undated curated docs aren't penalised.
+- **trust** — first-match glob against `SOURCE_WEIGHTS` (a JSON dict like
+  `{"docs/**": 1.2, "data/raw/notes/**": 0.7}`). Default is 1.0.
+- **agreement** — `AGREEMENT_BOOST` (default 1.2) when both the dense
+  and BM25 retrievers ranked the doc; 1.0 otherwise. The HybridRetriever
+  sets `metadata['agreement_count']` during RRF.
+
+The three signals multiply (`confidence = freshness * trust * agreement`)
+so a doc strong on all three compounds. The result becomes
+`final_score = rerank_score * confidence`, and `apply_reranker` sorts and
+truncates on `final_score`. This lets a confident-but-mid-ranked doc
+rescue itself into `TOP_K`, which the previous "score then truncate" flow
+couldn't do.
+
+## Ingest Deduplication
+
+`ENABLE_INGEST_DEDUP=true` (default) hashes each chunk's content
+(whitespace-and-case-insensitive SHA-256) during `ingest_path` and skips
+later copies. `IngestReport.duplicates_removed` is surfaced via the
+`/ingest` response and the `rag-ingest` CLI output. The hash is also
+written to `metadata['content_hash']` so downstream tooling can detect
+duplicates across ingest runs.
 
 ## Evaluation Harness
 
