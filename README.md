@@ -12,6 +12,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
 - Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites, and the run is rejected when too many sentences are unsupported.
 - SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
+- CI eval gate covering a happy-path dataset and an adversarial dataset, with a fixture-replay mode so real engine behavior can be checked offline.
 - Model routing and token budgeting across local models served by Ollama.
 - FastAPI service for ingestion, querying, health checks, and evaluation hooks.
 - Docker Compose for local infrastructure and CI-ready Docker build.
@@ -114,6 +115,12 @@ rag-eval --cases data/eval/seed_cases.jsonl --format markdown
 ```
 
 Customize `data/eval/seed_cases.jsonl` for your own corpus before running.
+The companion `data/eval/adversarial_cases.jsonl` is meant to *fail* —
+each case is a question the engine should refuse with
+`status: "insufficient_evidence"`. To run the harness offline against
+captured outputs, pass `--fixture data/eval/fixtures/seed.json`. Refresh
+fixtures from a live stack with `python scripts/eval_capture.py`.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the case schema and
 the feedback-loop semantics.
 
@@ -162,7 +169,8 @@ The default setup uses local providers:
 - `RETRIEVE_K=20` (first-stage candidate pool, narrowed to `TOP_K` by the reranker)
 - `RERANKER_MODE=cross_encoder` (`keyword` for the term-overlap heuristic, `disabled` to skip reranking entirely)
 - `CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, downloaded on first use)
-- `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor; raise to gate on regressions)
+- `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor for `seed.mean_grounding`; raise to gate on regressions)
+- `EVAL_BASELINE_STATUS_MATCH_RATE=0.0` (CI eval gate floor for `status_match_rate` on both datasets; catches adversarial cases that stop being refused)
 - `CACHE_ENABLED=true` (set to `false` to bypass all caches)
 - `CACHE_PATH=data/processed/cache.sqlite` (single SQLite file holding embedding, reranker, and answer namespaces)
 - `CACHE_TTL_SECONDS=86400` (default expiry; embeddings can be much longer in practice, answer cache benefits from shorter)

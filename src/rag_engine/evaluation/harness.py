@@ -27,6 +27,9 @@ class EvalCase:
     question: str
     must_cite: tuple[str, ...] = ()
     expected_terms: tuple[str, ...] = ()
+    expected_status: str = "ok"
+    """``ok`` for normal cases; ``insufficient_evidence`` for adversarial cases
+    that the engine should refuse to answer."""
 
 
 @dataclass
@@ -42,6 +45,8 @@ class EvalResult:
     latency_ms: float
     grounded_claim_rate: float = 1.0
     status: str = "ok"
+    expected_status: str = "ok"
+    status_matches_expected: bool = True
     citations: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -69,6 +74,7 @@ def load_cases(path: Path) -> list[EvalCase]:
                     question=str(obj["question"]),
                     must_cite=tuple(obj.get("must_cite", [])),
                     expected_terms=tuple(obj.get("expected_terms", [])),
+                    expected_status=str(obj.get("expected_status", "ok")),
                 )
             )
     return cases
@@ -102,6 +108,7 @@ def evaluate_case(case: EvalCase, runner: EvalRunner) -> EvalResult:
 
     answer = str(output.get("answer", ""))
     citations = list(output.get("citations", []))
+    status = str(output.get("status") or "ok")
     return EvalResult(
         case_id=case.id,
         question=case.question,
@@ -113,7 +120,9 @@ def evaluate_case(case: EvalCase, runner: EvalRunner) -> EvalResult:
         warnings=list(output.get("warnings", [])),
         latency_ms=round(latency_ms, 2),
         grounded_claim_rate=float(output.get("grounded_claim_rate", 1.0)),
-        status=str(output.get("status") or "ok"),
+        status=status,
+        expected_status=case.expected_status,
+        status_matches_expected=(status == case.expected_status),
         citations=citations,
     )
 
@@ -131,10 +140,12 @@ def evaluate_dataset(cases: list[EvalCase], runner: EvalRunner) -> EvalReport:
             "mean_iteration": 0.0,
             "insufficient_evidence_rate": 0.0,
             "mean_grounded_claim_rate": 0.0,
+            "status_match_rate": 0.0,
         }
     else:
         n = len(results)
         insufficient = sum(1 for r in results if r.status == "insufficient_evidence")
+        status_matches = sum(1 for r in results if r.status_matches_expected)
         aggregate = {
             "n": float(n),
             "mean_grounding": round(sum(r.grounding_score for r in results) / n, 3),
@@ -146,6 +157,7 @@ def evaluate_dataset(cases: list[EvalCase], runner: EvalRunner) -> EvalReport:
             "mean_grounded_claim_rate": round(
                 sum(r.grounded_claim_rate for r in results) / n, 3
             ),
+            "status_match_rate": round(status_matches / n, 3),
         }
     return EvalReport(results=results, aggregate=aggregate)
 
@@ -175,16 +187,19 @@ def format_markdown(report: EvalReport) -> str:
         f"- mean latency: {agg['mean_latency_ms']:.1f} ms",
         f"- insufficient-evidence rate: {agg['insufficient_evidence_rate']:.3f}",
         f"- mean grounded-claim rate: {agg['mean_grounded_claim_rate']:.3f}",
+        f"- status-match rate: {agg['status_match_rate']:.3f}",
         "",
         "## Per Case",
         "",
-        "| id | status | grounding | claims | cite hit | term recall | iters | latency (ms) |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| id | status | expected | match | grounding | claims | cite hit | term recall | iters | latency (ms) |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in report.results:
+        match_glyph = "yes" if r.status_matches_expected else "no"
         lines.append(
-            f"| {r.case_id} | {r.status} | {r.grounding_score:.3f} | "
-            f"{r.grounded_claim_rate:.3f} | {r.citation_hit_rate:.3f} | "
-            f"{r.term_recall:.3f} | {r.iteration} | {r.latency_ms:.1f} |"
+            f"| {r.case_id} | {r.status} | {r.expected_status} | {match_glyph} | "
+            f"{r.grounding_score:.3f} | {r.grounded_claim_rate:.3f} | "
+            f"{r.citation_hit_rate:.3f} | {r.term_recall:.3f} | "
+            f"{r.iteration} | {r.latency_ms:.1f} |"
         )
     return "\n".join(lines) + "\n"

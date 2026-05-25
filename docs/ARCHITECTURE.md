@@ -119,12 +119,42 @@ without Qdrant or Ollama.
 
 ## Evaluation in CI
 
-`scripts/eval_ci.py` runs the harness over `data/eval/seed_cases.jsonl` with
-a deterministic stub runner (CI doesn't have Qdrant/Ollama) and exits
-non-zero when `mean_grounding < EVAL_BASELINE_GROUNDING`. Today the gate
-catches harness regressions and malformed seed cases. When CI gains access
-to real models — or to a recorded fixture corpus — the same script can be
-pointed at a real runner to gate on actual answer quality.
+`scripts/eval_ci.py` runs two datasets in CI:
+
+- `data/eval/seed_cases.jsonl` — happy-path questions the engine should
+  answer.
+- `data/eval/adversarial_cases.jsonl` — questions the engine should
+  *refuse* (out-of-corpus facts, false-premise leading questions,
+  under-specified queries). Each adversarial case carries
+  `expected_status: insufficient_evidence`.
+
+Each dataset is driven by one of two runners:
+
+- **Fixture runner** (default when a fixture exists): replays previously
+  captured live outputs from `data/eval/fixtures/{seed,adversarial}.json`.
+  Captured with `scripts/eval_capture.py` against a working Qdrant +
+  Ollama stack; refreshed in PRs whenever model behavior should change.
+  CI gates on real engine behavior without loading models.
+- **Stub runner** (fallback when no fixture is present): synthesises an
+  output that satisfies the case's `expected_status`. Useful for
+  bootstrapping a brand-new corpus.
+
+The gate fails when any of three baselines aren't met:
+
+- `EVAL_BASELINE_GROUNDING` — `seed.mean_grounding` floor.
+- `EVAL_BASELINE_STATUS_MATCH_RATE` — applied to both
+  `seed.status_match_rate` (catches refused-by-mistake regressions) and
+  `adversarial.status_match_rate` (catches answered-by-mistake
+  regressions on questions that should be refused).
+
+Refreshing fixtures::
+
+    python scripts/eval_capture.py \\
+        --cases data/eval/seed_cases.jsonl \\
+        --fixture data/eval/fixtures/seed.json
+
+`rag-eval` also accepts `--fixture <path>` so the same replay path is
+available for ad-hoc local runs without infrastructure.
 
 ## Caching
 

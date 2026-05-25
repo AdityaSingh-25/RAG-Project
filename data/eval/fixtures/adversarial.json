@@ -1,0 +1,82 @@
+{
+  "entries": [
+    {
+      "question": "What is the SHA-256 hash of the README in this repo?",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.0,
+        "warnings": ["no_retrieved_context"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    },
+    {
+      "question": "How does this project's GraphRAG node-deduplication policy interact with Cypher queries?",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.18,
+        "warnings": ["low_per_claim_grounding"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    },
+    {
+      "question": "Why did the project remove its Redis-based answer cache last quarter?",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.12,
+        "warnings": ["low_grounding_after_retry"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    },
+    {
+      "question": "Which Kubernetes operator does the deployment guide recommend for autoscaling Ollama?",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.0,
+        "warnings": ["no_retrieved_context"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    },
+    {
+      "question": "What's the exact average latency the team measured under p99 load?",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.15,
+        "warnings": ["low_grounding_after_retry"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    },
+    {
+      "question": "Compare this engine's BM25 + ColBERT-v2 hybrid weights against the defaults.",
+      "captured_at": null,
+      "output": {
+        "answer": "Insufficient evidence to answer confidently from the retrieved context.",
+        "citations": [],
+        "grounding_score": 0.22,
+        "warnings": ["low_per_claim_grounding"],
+        "iteration": 1,
+        "status": "insufficient_evidence",
+        "grounded_claim_rate": 0.0
+      }
+    }
+  ]
+}
