@@ -14,3 +14,10 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Frontend (Next.js)
+web/node_modules/
+web/.next/
+web/out/
+web/.env*.local
+web/next-env.d.ts
+web/tsconfig.tsbuildinfo
