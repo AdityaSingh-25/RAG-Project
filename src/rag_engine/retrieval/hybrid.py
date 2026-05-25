@@ -34,19 +34,35 @@ def reciprocal_rank_fusion(
     rrf_k: int,
     top_k: int,
 ) -> list[Document]:
-    """Fuse multiple ranked document lists into a single ranking via RRF."""
+    """Fuse multiple ranked document lists into a single ranking via RRF.
+
+    Each fused document carries two metadata fields useful downstream:
+
+    - ``rrf_score`` — the fused score.
+    - ``agreement_count`` — how many input lists the doc appeared in; the
+      source-confidence scorer uses this as the "retrievers agree" signal.
+    """
     scores: dict[tuple[str, str], float] = {}
+    list_counts: dict[tuple[str, str], int] = {}
     representatives: dict[tuple[str, str], Document] = {}
     for ranked in ranked_lists:
+        seen_in_list: set[tuple[str, str]] = set()
         for rank, doc in enumerate(ranked, start=1):
             key = _doc_key(doc)
             scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
             representatives.setdefault(key, doc)
+            if key not in seen_in_list:
+                list_counts[key] = list_counts.get(key, 0) + 1
+                seen_in_list.add(key)
     ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     fused: list[Document] = []
     for key, score in ordered[:top_k]:
         doc = representatives[key]
-        merged_metadata = {**doc.metadata, "rrf_score": round(score, 6)}
+        merged_metadata = {
+            **doc.metadata,
+            "rrf_score": round(score, 6),
+            "agreement_count": list_counts.get(key, 1),
+        }
         fused.append(Document(page_content=doc.page_content, metadata=merged_metadata))
     return fused
 

@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     bm25_index_path: str = "data/processed/bm25_index.pkl"
     rrf_k: int = Field(default=60, ge=1)
 
+    enable_ingest_dedup: bool = True
+
+    enable_source_confidence: bool = True
+    freshness_half_life_days: int = Field(default=365, ge=1)
+    agreement_boost: float = Field(default=1.2, ge=1.0, le=3.0)
+    source_weights: dict[str, float] = Field(default_factory=dict)
+
     eval_baseline_grounding: float = Field(default=0.0, ge=0.0, le=1.0)
 
     langchain_tracing_v2: bool = False

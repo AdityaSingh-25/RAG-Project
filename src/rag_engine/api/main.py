@@ -143,8 +143,11 @@ def ingest(request: IngestRequest) -> dict[str, Any]:
     source = Path(request.source_path)
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path does not exist: {source}")
-    count = ingest_path(source, settings)
-    return {"ingested_chunks": count}
+    report = ingest_path(source, settings)
+    return {
+        "ingested_chunks": report.indexed,
+        "duplicates_removed": report.duplicates_removed,
+    }
 
 
 def run() -> None:

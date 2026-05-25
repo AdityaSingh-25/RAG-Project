@@ -10,6 +10,8 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
+- Source confidence scoring (freshness + glob-keyed trust weights + dense/BM25 agreement) multiplied into the reranker score so trusted sources rise in ranking.
+- Content-hash deduplication at ingest, so the same chunk appearing in multiple files isn't indexed or BM25-corpused twice.
 - Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites, and the run is rejected when too many sentences are unsupported.
 - SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
 - Model routing and token budgeting across local models served by Ollama.
@@ -163,6 +165,11 @@ The default setup uses local providers:
 - `RERANKER_MODE=cross_encoder` (`keyword` for the term-overlap heuristic, `disabled` to skip reranking entirely)
 - `CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, downloaded on first use)
 - `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor; raise to gate on regressions)
+- `ENABLE_INGEST_DEDUP=true` (set to `false` to keep duplicate chunks; the SHA-256 hash is still written to metadata so you can dedupe later)
+- `ENABLE_SOURCE_CONFIDENCE=true` (multiplies reranker scores by freshness × trust × agreement)
+- `FRESHNESS_HALF_LIFE_DAYS=365` (how fast a doc's freshness signal decays)
+- `AGREEMENT_BOOST=1.2` (multiplier when both dense and BM25 ranked a doc)
+- `SOURCE_WEIGHTS={}` (JSON dict mapping glob -> trust multiplier; e.g. `{"docs/**": 1.2}`)
 - `CACHE_ENABLED=true` (set to `false` to bypass all caches)
 - `CACHE_PATH=data/processed/cache.sqlite` (single SQLite file holding embedding, reranker, and answer namespaces)
 - `CACHE_TTL_SECONDS=86400` (default expiry; embeddings can be much longer in practice, answer cache benefits from shorter)
