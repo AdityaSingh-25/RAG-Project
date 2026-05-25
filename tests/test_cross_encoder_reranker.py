@@ -87,6 +87,7 @@ def test_apply_reranker_cross_encoder_mode_calls_cross_encoder(monkeypatch) -> N
         reranker_mode="cross_encoder",
         cross_encoder_model="stub-model",
         top_k=1,
+        cache_enabled=False,
     )
     docs = [_doc("alpha"), _doc("beta")]
 
@@ -98,6 +99,12 @@ def test_apply_reranker_cross_encoder_mode_calls_cross_encoder(monkeypatch) -> N
         captured["top_k"] = top_k
         return documents[:top_k]
 
+    # apply_reranker now loads (and optionally caches) the encoder before
+    # calling rerank_with_cross_encoder, so we also need to stub the loader.
+    monkeypatch.setattr(
+        "rag_engine.retrieval.reranker.load_cross_encoder_with_cache",
+        lambda **_kw: _StubEncoder({}),
+    )
     monkeypatch.setattr(
         "rag_engine.retrieval.reranker.rerank_with_cross_encoder",
         fake_cross_encoder,

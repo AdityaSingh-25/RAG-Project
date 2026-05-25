@@ -100,6 +100,53 @@ catches harness regressions and malformed seed cases. When CI gains access
 to real models — or to a recorded fixture corpus — the same script can be
 pointed at a real runner to gate on actual answer quality.
 
+## Caching
+
+A single SQLite file at `CACHE_PATH` backs three namespaces sharing one
+TTL:
+
+- **embeddings** — keyed on `(model, text)`. Sentence Transformers calls
+  are deterministic, so cache hits skip inference outright. Both `/query`
+  and `/ingest` paths benefit.
+- **cross_encoder** — keyed on `(model, question, passage)`. The slowest
+  hot path after the Phase 5 reranker landed; per-pair caching pays off
+  whenever a follow-up query reuses passages from the candidate pool.
+- **answers** — keyed on the normalised question text. Bypassed with
+  `bypass_cache=true` on the `/query` payload. Only successful answers
+  (`status="ok"`) are cached; `insufficient_evidence` exits are not.
+
+Cache hits and misses increment counters of the form
+`cache.<namespace>.{hit,miss}`, visible via `/metrics`. Set
+`CACHE_ENABLED=false` for full pass-through (useful when measuring the
+unprotected hot path).
+
+## Observability
+
+Every `/query` mints a `trace_id` (UUID4 hex). Each graph node emits a
+single JSON log line tagged with that trace ID plus stage-specific
+fields:
+
+- `graph.retrieve` — `n_candidates`, `n_reranked`, `retrieval_mode`,
+  `reranker_mode`, `duration_ms`.
+- `graph.answer` — `model`, `answer_chars`, `duration_ms`.
+- `graph.critique` — `grounding_score`, `warnings`.
+- `graph.rewrite` — `iteration`, `rewritten_chars`.
+- `graph.fallback` — `reason`, `iteration`.
+- `graph.finalize` — terminal grounding_score and iteration.
+
+The `/metrics` endpoint returns a JSON snapshot of the same counters that
+drive the logs:
+
+- **totals** — `api.query.total`, `api.query.status.{ok,insufficient_evidence}`,
+  `cache.<namespace>.{hit,miss}`, `graph.rewrite.invocations`,
+  `graph.fallback.invocations`, `graph.fallback.reason.<reason>`.
+- **samples** — latency observations summarised with count, mean, p50,
+  p95, and max (`api.query.latency_ms`, `graph.retrieve.latency_ms`,
+  `graph.answer.latency_ms`, `graph.iteration`).
+
+`LOG_FORMAT=text` switches to a human-readable formatter for local
+debugging; the JSON output is the production default.
+
 ## Agent Responsibilities
 
 - Planner agent: classifies the query and selects tools.

@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     reranker_mode: Literal["keyword", "cross_encoder", "disabled"] = "cross_encoder"
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    cache_enabled: bool = True
+    cache_path: str = "data/processed/cache.sqlite"
+    cache_ttl_seconds: int = Field(default=86_400, ge=0)
+    answer_cache_enabled: bool = True
+
+    log_format: Literal["json", "text"] = "json"
+
     enable_feedback_loop: bool = True
     grounding_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     max_retry_iterations: int = Field(default=1, ge=0, le=3)
