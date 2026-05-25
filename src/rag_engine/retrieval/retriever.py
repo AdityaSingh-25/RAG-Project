@@ -6,7 +6,7 @@ from langchain_core.documents import Document
 from rag_engine.config.settings import Settings
 from rag_engine.retrieval.bm25_store import load_bm25_index
 from rag_engine.retrieval.hybrid import HybridRetriever
-from rag_engine.vectorstore.qdrant_store import build_vectorstore
+from rag_engine.vectorstore.qdrant_store import build_vectorstore_for
 
 
 class Retriever(Protocol):
@@ -24,11 +24,7 @@ def build_retriever(settings: Settings) -> Retriever:
     downstream reranker has a meaningful pool to choose from before narrowing
     to ``settings.top_k``.
     """
-    vectorstore = build_vectorstore(
-        qdrant_url=settings.qdrant_url,
-        collection_name=settings.qdrant_collection,
-        embedding_model=settings.embedding_model,
-    )
+    vectorstore = build_vectorstore_for(settings)
     dense = vectorstore.as_retriever(search_kwargs={"k": settings.retrieve_k})
 
     if settings.retrieval_mode == "dense":

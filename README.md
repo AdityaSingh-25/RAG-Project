@@ -10,6 +10,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
+- SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
 - Model routing and token budgeting across local models served by Ollama.
 - FastAPI service for ingestion, querying, health checks, and evaluation hooks.
 - Docker Compose for local infrastructure and CI-ready Docker build.
@@ -155,6 +156,11 @@ The default setup uses local providers:
 - `RERANKER_MODE=cross_encoder` (`keyword` for the term-overlap heuristic, `disabled` to skip reranking entirely)
 - `CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, downloaded on first use)
 - `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor; raise to gate on regressions)
+- `CACHE_ENABLED=true` (set to `false` to bypass all caches)
+- `CACHE_PATH=data/processed/cache.sqlite` (single SQLite file holding embedding, reranker, and answer namespaces)
+- `CACHE_TTL_SECONDS=86400` (default expiry; embeddings can be much longer in practice, answer cache benefits from shorter)
+- `ANSWER_CACHE_ENABLED=true` (orthogonal toggle for the question-keyed answer cache; pass `bypass_cache=true` on a `/query` to fetch fresh)
+- `LOG_FORMAT=json` (set to `text` for human-readable lines instead)
 
 LangSmith is optional. Enable it only if you want hosted tracing.
 

@@ -4,12 +4,15 @@ from langgraph.graph import END, StateGraph
 from rag_engine.agents.state import AgentState
 from rag_engine.config.settings import Settings
 from rag_engine.evaluation.hallucination import verify_answer_confidence
+from rag_engine.observability.counters import counters
+from rag_engine.observability.logging import get_logger, log_event, now_ms
 from rag_engine.retrieval.query_rewriter import rewrite_query
 from rag_engine.retrieval.reranker import apply_reranker
 from rag_engine.retrieval.retriever import build_retriever
 from rag_engine.routing.model_router import ModelRouter
 from rag_engine.utils.tokenization import count_tokens
 
+_logger = get_logger("rag_engine.graph")
 
 INSUFFICIENT_EVIDENCE_MESSAGE = (
     "Insufficient evidence to answer confidently from the retrieved context."
@@ -43,11 +46,27 @@ def build_graph(settings: Settings):
     router = ModelRouter(settings)
 
     def retrieve(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
+        started = now_ms()
         documents = retriever.invoke(state["question"])
         reranked = apply_reranker(state["question"], documents, settings)
+        duration = now_ms() - started
+        counters().observe("graph.retrieve.latency_ms", duration)
+        log_event(
+            _logger,
+            "graph.retrieve",
+            trace_id=trace_id,
+            duration_ms=round(duration, 2),
+            n_candidates=len(documents),
+            n_reranked=len(reranked),
+            retrieval_mode=settings.retrieval_mode,
+            reranker_mode=settings.reranker_mode,
+        )
         return {**state, "documents": reranked}
 
     def answer(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
+        started = now_ms()
         sorted_documents = sorted(
             state["documents"],
             key=lambda doc: doc.metadata.get("score", 0),
@@ -58,24 +77,54 @@ def build_graph(settings: Settings):
         response = llm.invoke(_answer_prompt(state["question"], context))
         answer_text = getattr(response, "content", str(response))
         citations = [_citation(doc, index) for index, doc in enumerate(sorted_documents, start=1)]
+        duration = now_ms() - started
+        counters().observe("graph.answer.latency_ms", duration)
+        log_event(
+            _logger,
+            "graph.answer",
+            trace_id=trace_id,
+            duration_ms=round(duration, 2),
+            model=getattr(llm, "model", "unknown"),
+            answer_chars=len(answer_text),
+        )
         return {**state, "answer": answer_text, "citations": citations}
 
     def critique(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
         confidence = verify_answer_confidence(state["answer"], state["documents"])
         score = confidence["grounding_score"]
         warnings = confidence["warnings"]
+        log_event(
+            _logger,
+            "graph.critique",
+            trace_id=trace_id,
+            grounding_score=score,
+            warnings=warnings,
+        )
         return {**state, "grounding_score": score, "warnings": warnings}
 
     def rewrite(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
         original = state.get("original_question") or state["question"]
         rewritten = rewrite_query(original, state.get("documents", []))
+        next_iteration = state.get("iteration", 0) + 1
+        counters().increment("graph.rewrite.invocations")
+        counters().observe("graph.iteration", next_iteration)
+        log_event(
+            _logger,
+            "graph.rewrite",
+            trace_id=trace_id,
+            iteration=next_iteration,
+            rewritten_chars=len(rewritten),
+        )
         return {
             **state,
             "question": rewritten,
-            "iteration": state.get("iteration", 0) + 1,
+            "iteration": next_iteration,
         }
 
     def fallback(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
         reason = (
             "no_retrieved_context"
             if not state.get("documents")
@@ -84,6 +133,15 @@ def build_graph(settings: Settings):
         warnings = list(state.get("warnings", []))
         if reason not in warnings:
             warnings.append(reason)
+        counters().increment("graph.fallback.invocations")
+        counters().increment(f"graph.fallback.reason.{reason}")
+        log_event(
+            _logger,
+            "graph.fallback",
+            trace_id=trace_id,
+            reason=reason,
+            iteration=state.get("iteration", 0),
+        )
         return {
             **state,
             "answer": INSUFFICIENT_EVIDENCE_MESSAGE,
@@ -93,6 +151,15 @@ def build_graph(settings: Settings):
         }
 
     def finalize_ok(state: AgentState) -> AgentState:
+        trace_id = state.get("trace_id", "-")
+        counters().increment("graph.finalize.ok")
+        log_event(
+            _logger,
+            "graph.finalize",
+            trace_id=trace_id,
+            grounding_score=state.get("grounding_score", 0.0),
+            iteration=state.get("iteration", 0),
+        )
         if state.get("status"):
             return state
         return {**state, "status": "ok"}

@@ -14,4 +14,5 @@ class AgentState(TypedDict):
     warnings: list[str]
     iteration: int
     status: str
+    trace_id: str
 

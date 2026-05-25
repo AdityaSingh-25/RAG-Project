@@ -13,6 +13,7 @@ via ``CROSS_ENCODER_MODEL`` if you have a domain-tuned model.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from langchain_core.documents import Document
@@ -30,6 +31,23 @@ def _load_cross_encoder(model_name: str) -> CrossEncoderLike:
     from sentence_transformers import CrossEncoder
 
     return CrossEncoder(model_name)
+
+
+def load_cross_encoder_with_cache(
+    model_name: str,
+    cache_enabled: bool,
+    cache_path: str,
+    cache_ttl_seconds: int,
+) -> CrossEncoderLike:
+    """Return the raw cross-encoder, optionally wrapped in the per-pair cache."""
+    inner = _load_cross_encoder(model_name)
+    if not cache_enabled:
+        return inner
+    from rag_engine.cache.reranker_cache import CachingCrossEncoder
+    from rag_engine.cache.store import CacheStore
+
+    store = CacheStore(Path(cache_path), cache_ttl_seconds)
+    return CachingCrossEncoder(inner=inner, store=store, model_name=model_name)
 
 
 def rerank_with_cross_encoder(

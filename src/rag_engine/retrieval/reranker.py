@@ -3,7 +3,10 @@ import re
 from langchain_core.documents import Document
 
 from rag_engine.config.settings import Settings
-from rag_engine.retrieval.cross_encoder_reranker import rerank_with_cross_encoder
+from rag_engine.retrieval.cross_encoder_reranker import (
+    load_cross_encoder_with_cache,
+    rerank_with_cross_encoder,
+)
 
 
 def apply_reranker(
@@ -19,11 +22,18 @@ def apply_reranker(
     if mode == "disabled":
         return list(documents[: settings.top_k])
     if mode == "cross_encoder":
+        encoder = load_cross_encoder_with_cache(
+            model_name=settings.cross_encoder_model,
+            cache_enabled=settings.cache_enabled,
+            cache_path=settings.cache_path,
+            cache_ttl_seconds=settings.cache_ttl_seconds,
+        )
         return rerank_with_cross_encoder(
             question,
             documents,
             top_k=settings.top_k,
             model_name=settings.cross_encoder_model,
+            encoder=encoder,
         )
     return rerank_documents(question, documents, top_k=settings.top_k)
 
