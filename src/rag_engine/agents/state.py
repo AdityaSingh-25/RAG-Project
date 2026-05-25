@@ -17,4 +17,5 @@ class AgentState(TypedDict):
     trace_id: str
     grounded_claim_rate: float
     claim_grounding: list[dict[str, Any]]
+    pipeline_trace: list[dict[str, Any]]
 

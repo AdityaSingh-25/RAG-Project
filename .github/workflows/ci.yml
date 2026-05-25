@@ -25,6 +25,7 @@ jobs:
       - name: Eval gate
         env:
           EVAL_BASELINE_GROUNDING: "0.5"
+          EVAL_BASELINE_STATUS_MATCH_RATE: "1.0"
         run: python scripts/eval_ci.py
       - name: Docker build
         run: docker build -t rag-engine:ci .

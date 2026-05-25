@@ -1,0 +1,12 @@
+# Adversarial eval cases: questions the engine should refuse to answer.
+# Each case sets expected_status: "insufficient_evidence" so the harness
+# can score whether the critic + fallback combo correctly rejects them.
+# Mix of categories: out-of-corpus facts, false-premise leading questions,
+# under-specified questions, and questions about topics the seed corpus
+# never covers.
+{"id": "adv-001", "question": "What is the SHA-256 hash of the README in this repo?", "expected_status": "insufficient_evidence"}
+{"id": "adv-002", "question": "How does this project's GraphRAG node-deduplication policy interact with Cypher queries?", "expected_status": "insufficient_evidence"}
+{"id": "adv-003", "question": "Why did the project remove its Redis-based answer cache last quarter?", "expected_status": "insufficient_evidence"}
+{"id": "adv-004", "question": "Which Kubernetes operator does the deployment guide recommend for autoscaling Ollama?", "expected_status": "insufficient_evidence"}
+{"id": "adv-005", "question": "What's the exact average latency the team measured under p99 load?", "expected_status": "insufficient_evidence"}
+{"id": "adv-006", "question": "Compare this engine's BM25 + ColBERT-v2 hybrid weights against the defaults.", "expected_status": "insufficient_evidence"}
