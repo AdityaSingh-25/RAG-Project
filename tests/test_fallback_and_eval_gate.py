@@ -48,20 +48,46 @@ def test_eval_ci_passes_with_default_baseline() -> None:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
-        env={**os.environ, "EVAL_BASELINE_GROUNDING": "0.0"},
+        env={
+            **os.environ,
+            "EVAL_BASELINE_GROUNDING": "0.0",
+            "EVAL_BASELINE_STATUS_MATCH_RATE": "0.0",
+        },
     )
     assert result.returncode == 0, result.stderr
-    assert "OK: mean grounding" in result.stdout
+    assert "OK:   seed.mean_grounding" in result.stdout
+    assert "OK:   adversarial.status_match_rate" in result.stdout
 
 
-def test_eval_ci_fails_when_baseline_is_unachievable() -> None:
+def test_eval_ci_fails_when_grounding_baseline_is_unachievable() -> None:
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "eval_ci.py")],
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
-        env={**os.environ, "EVAL_BASELINE_GROUNDING": "1.0"},
+        env={
+            **os.environ,
+            "EVAL_BASELINE_GROUNDING": "1.0",
+            "EVAL_BASELINE_STATUS_MATCH_RATE": "0.0",
+        },
     )
-    # Stub returns 0.95, so baseline=1.0 must fail.
+    # Fixture grounding is ~0.8 on seed, so baseline=1.0 must fail.
     assert result.returncode == 1
-    assert "FAIL: mean grounding" in result.stderr
+    assert "FAIL: seed.mean_grounding" in result.stderr
+
+
+def test_eval_ci_fails_when_status_match_baseline_is_unachievable() -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "eval_ci.py")],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={
+            **os.environ,
+            "EVAL_BASELINE_GROUNDING": "0.0",
+            "EVAL_BASELINE_STATUS_MATCH_RATE": "1.1",
+        },
+    )
+    # No achievable status_match_rate clears 1.1; both seed + adversarial fail.
+    assert result.returncode == 1
+    assert "FAIL: seed.status_match_rate" in result.stderr

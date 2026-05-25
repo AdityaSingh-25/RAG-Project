@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     rrf_k: int = Field(default=60, ge=1)
 
     eval_baseline_grounding: float = Field(default=0.0, ge=0.0, le=1.0)
+    eval_baseline_status_match_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
     langchain_tracing_v2: bool = False
     langchain_project: str = "rag-multi-agent-engine"
