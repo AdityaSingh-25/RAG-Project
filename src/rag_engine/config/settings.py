@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     grounding_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     max_retry_iterations: int = Field(default=1, ge=0, le=3)
 
+    enforce_per_claim_citations: bool = True
+    claim_support_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
+    min_grounded_claim_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+
     retrieval_mode: Literal["dense", "hybrid"] = "hybrid"
     bm25_index_path: str = "data/processed/bm25_index.pkl"
     rrf_k: int = Field(default=60, ge=1)

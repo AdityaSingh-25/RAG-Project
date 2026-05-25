@@ -50,6 +50,7 @@ def stub_runner_for(case: EvalCase) -> dict[str, object]:
         "warnings": [],
         "iteration": 0,
         "status": "ok",
+        "grounded_claim_rate": 1.0,
     }
 
 

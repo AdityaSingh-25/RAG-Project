@@ -40,6 +40,7 @@ class EvalResult:
     iteration: int
     warnings: list[str]
     latency_ms: float
+    grounded_claim_rate: float = 1.0
     status: str = "ok"
     citations: list[dict[str, Any]] = field(default_factory=list)
 
@@ -111,6 +112,7 @@ def evaluate_case(case: EvalCase, runner: EvalRunner) -> EvalResult:
         iteration=int(output.get("iteration", 0)),
         warnings=list(output.get("warnings", [])),
         latency_ms=round(latency_ms, 2),
+        grounded_claim_rate=float(output.get("grounded_claim_rate", 1.0)),
         status=str(output.get("status") or "ok"),
         citations=citations,
     )
@@ -128,6 +130,7 @@ def evaluate_dataset(cases: list[EvalCase], runner: EvalRunner) -> EvalReport:
             "mean_latency_ms": 0.0,
             "mean_iteration": 0.0,
             "insufficient_evidence_rate": 0.0,
+            "mean_grounded_claim_rate": 0.0,
         }
     else:
         n = len(results)
@@ -140,6 +143,9 @@ def evaluate_dataset(cases: list[EvalCase], runner: EvalRunner) -> EvalReport:
             "mean_latency_ms": round(sum(r.latency_ms for r in results) / n, 2),
             "mean_iteration": round(sum(r.iteration for r in results) / n, 2),
             "insufficient_evidence_rate": round(insufficient / n, 3),
+            "mean_grounded_claim_rate": round(
+                sum(r.grounded_claim_rate for r in results) / n, 3
+            ),
         }
     return EvalReport(results=results, aggregate=aggregate)
 
@@ -168,15 +174,17 @@ def format_markdown(report: EvalReport) -> str:
         f"- mean iterations: {agg['mean_iteration']:.2f}",
         f"- mean latency: {agg['mean_latency_ms']:.1f} ms",
         f"- insufficient-evidence rate: {agg['insufficient_evidence_rate']:.3f}",
+        f"- mean grounded-claim rate: {agg['mean_grounded_claim_rate']:.3f}",
         "",
         "## Per Case",
         "",
-        "| id | status | grounding | cite hit | term recall | iters | latency (ms) |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| id | status | grounding | claims | cite hit | term recall | iters | latency (ms) |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in report.results:
         lines.append(
-            f"| {r.case_id} | {r.status} | {r.grounding_score:.3f} | {r.citation_hit_rate:.3f} | "
+            f"| {r.case_id} | {r.status} | {r.grounding_score:.3f} | "
+            f"{r.grounded_claim_rate:.3f} | {r.citation_hit_rate:.3f} | "
             f"{r.term_recall:.3f} | {r.iteration} | {r.latency_ms:.1f} |"
         )
     return "\n".join(lines) + "\n"

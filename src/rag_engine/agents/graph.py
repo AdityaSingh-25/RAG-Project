@@ -3,6 +3,7 @@ from langgraph.graph import END, StateGraph
 
 from rag_engine.agents.state import AgentState
 from rag_engine.config.settings import Settings
+from rag_engine.evaluation.claim_grounding import verify_claims
 from rag_engine.evaluation.hallucination import verify_answer_confidence
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import get_logger, log_event, now_ms
@@ -24,12 +25,23 @@ def route_after_critique(state: AgentState, settings: Settings) -> str:
 
     Returns the next node name: ``"rewrite"`` to loop, ``"fallback"`` to refuse,
     or ``END`` when the answer is good enough to ship.
+
+    Both the overall grounding score AND the per-claim grounding rate must
+    clear their thresholds. The per-claim check is what catches answers
+    that mention the right keywords overall but have individual sentences
+    drifting away from cited chunks.
     """
     score = state.get("grounding_score", 0.0)
+    claim_rate = state.get("grounded_claim_rate", 1.0)
     iteration = state.get("iteration", 0)
-    threshold = settings.grounding_threshold
 
-    if score >= threshold:
+    overall_ok = score >= settings.grounding_threshold
+    claims_ok = (
+        not settings.enforce_per_claim_citations
+        or claim_rate >= settings.min_grounded_claim_rate
+    )
+
+    if overall_ok and claims_ok:
         return END
 
     can_retry = (
@@ -93,15 +105,48 @@ def build_graph(settings: Settings):
         trace_id = state.get("trace_id", "-")
         confidence = verify_answer_confidence(state["answer"], state["documents"])
         score = confidence["grounding_score"]
-        warnings = confidence["warnings"]
+        warnings = list(confidence["warnings"])
+
+        report = verify_claims(
+            state["answer"],
+            state["documents"],
+            support_threshold=settings.claim_support_threshold,
+        )
+        claim_rate = report.grounded_claim_rate
+        if (
+            settings.enforce_per_claim_citations
+            and report.claims
+            and claim_rate < settings.min_grounded_claim_rate
+        ):
+            warnings.append("low_per_claim_grounding")
+
+        counters().observe("graph.critique.grounded_claim_rate", claim_rate)
         log_event(
             _logger,
             "graph.critique",
             trace_id=trace_id,
             grounding_score=score,
+            grounded_claim_rate=claim_rate,
+            n_claims=len(report.claims),
+            n_ungrounded=len(report.ungrounded),
             warnings=warnings,
         )
-        return {**state, "grounding_score": score, "warnings": warnings}
+        return {
+            **state,
+            "grounding_score": score,
+            "warnings": warnings,
+            "grounded_claim_rate": claim_rate,
+            "claim_grounding": [
+                {
+                    "sentence": c.sentence,
+                    "cited_indices": list(c.cited_indices),
+                    "valid_indices": list(c.valid_indices),
+                    "support_score": c.support_score,
+                    "is_grounded": c.is_grounded,
+                }
+                for c in report.claims
+            ],
+        }
 
     def rewrite(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
@@ -125,11 +170,15 @@ def build_graph(settings: Settings):
 
     def fallback(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
-        reason = (
-            "no_retrieved_context"
-            if not state.get("documents")
-            else "low_grounding_after_retry"
-        )
+        if not state.get("documents"):
+            reason = "no_retrieved_context"
+        elif (
+            settings.enforce_per_claim_citations
+            and state.get("grounded_claim_rate", 1.0) < settings.min_grounded_claim_rate
+        ):
+            reason = "low_per_claim_grounding"
+        else:
+            reason = "low_grounding_after_retry"
         warnings = list(state.get("warnings", []))
         if reason not in warnings:
             warnings.append(reason)
@@ -148,6 +197,7 @@ def build_graph(settings: Settings):
             "citations": [],
             "status": "insufficient_evidence",
             "warnings": warnings,
+            "claim_grounding": [],
         }
 
     def finalize_ok(state: AgentState) -> AgentState:
@@ -201,11 +251,18 @@ def _format_context(documents: list[Document], settings: Settings) -> str:
 
 def _answer_prompt(question: str, context: str) -> str:
     return (
-        "You are a grounded RAG assistant. Answer only from the provided context. "
-        "If the context is insufficient, say what is missing.\n\n"
+        "You are a grounded RAG assistant. Use ONLY the provided context — do "
+        "not draw on outside knowledge.\n"
+        "Rules:\n"
+        " - Write in short, self-contained sentences.\n"
+        " - Every factual sentence MUST end with one or more citation markers "
+        "such as [1] or [2][3] pointing to the chunks that support it.\n"
+        " - Only cite chunk numbers that appear in the Context section below.\n"
+        " - If the context does not answer the question, say exactly what is "
+        "missing instead of guessing.\n\n"
         f"Question:\n{question}\n\n"
         f"Context:\n{context}\n\n"
-        "Answer with concise reasoning and cite sources like [1], [2]."
+        "Answer:"
     )
 
 

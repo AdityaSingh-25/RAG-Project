@@ -15,4 +15,6 @@ class AgentState(TypedDict):
     iteration: int
     status: str
     trace_id: str
+    grounded_claim_rate: float
+    claim_grounding: list[dict[str, Any]]
 

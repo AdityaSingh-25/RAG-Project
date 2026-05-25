@@ -106,6 +106,8 @@ def query(request: QueryRequest) -> dict[str, Any]:
             "iteration": 0,
             "status": "",
             "trace_id": trace_id,
+            "grounded_claim_rate": 1.0,
+            "claim_grounding": [],
         }
     )
     duration = now_ms() - started
@@ -128,6 +130,8 @@ def query(request: QueryRequest) -> dict[str, Any]:
         "warnings": result["warnings"],
         "iteration": result.get("iteration", 0),
         "status": result.get("status") or "ok",
+        "grounded_claim_rate": result.get("grounded_claim_rate", 1.0),
+        "claim_grounding": result.get("claim_grounding", []),
     }
     if store is not None and payload["status"] == "ok":
         answer_cache.put(store, request.question, payload)
