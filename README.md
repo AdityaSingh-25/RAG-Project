@@ -10,6 +10,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
+- Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites, and the run is rejected when too many sentences are unsupported.
 - SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
 - Model routing and token budgeting across local models served by Ollama.
 - FastAPI service for ingestion, querying, health checks, and evaluation hooks.
@@ -101,7 +102,10 @@ retries the critic triggered (0 when the first answer met the grounding
 threshold) and a `status` field that is `"ok"` when the critic was
 satisfied or `"insufficient_evidence"` when the retry budget was exhausted
 without clearing the grounding threshold — in that case `answer` is a
-structured refusal rather than a fabricated response.
+structured refusal rather than a fabricated response. The response also
+carries `grounded_claim_rate` and a `claim_grounding` array — one entry per
+sentence in the answer with its parsed citations and per-claim support
+score, so downstream UIs can highlight unsupported claims.
 
 6. Evaluate the engine against a JSONL of cases:
 
@@ -149,6 +153,9 @@ The default setup uses local providers:
 - `ENABLE_FEEDBACK_LOOP=true` (set to `false` to keep the legacy linear pipeline)
 - `GROUNDING_THRESHOLD=0.6` (minimum score to skip the rewrite-and-retry loop)
 - `MAX_RETRY_ITERATIONS=1` (hard cap on feedback-loop iterations per query)
+- `ENFORCE_PER_CLAIM_CITATIONS=true` (set to `false` to keep claim grounding for visibility only and skip the gate)
+- `CLAIM_SUPPORT_THRESHOLD=0.2` (term-overlap floor for a single claim to count as supported)
+- `MIN_GROUNDED_CLAIM_RATE=0.5` (fraction of claims that must be grounded for the answer to ship)
 - `RETRIEVAL_MODE=hybrid` (`dense` to disable BM25 fusion)
 - `BM25_INDEX_PATH=data/processed/bm25_index.pkl` (rebuilt on every ingest)
 - `RRF_K=60` (Reciprocal Rank Fusion constant)

@@ -20,16 +20,42 @@
 
 The workflow uses a 3-way conditional edge from `critique`:
 
-- `critique → rewrite → retrieve → answer → critique` while
-  `grounding_score < grounding_threshold` and `iteration < max_retry_iterations`.
-- `critique → fallback` when grounding is below threshold and the retry budget
-  is exhausted (or the loop is disabled). The fallback node replaces the
+- `critique → rewrite → retrieve → answer → critique` while the answer
+  fails either the overall grounding check (`grounding_score < grounding_threshold`)
+  or the per-claim check (`grounded_claim_rate < min_grounded_claim_rate`),
+  and `iteration < max_retry_iterations`.
+- `critique → fallback` when either check fails and the retry budget is
+  exhausted (or the loop is disabled). The fallback node replaces the
   drafted answer with a structured "insufficient evidence" response,
-  clears citations, and sets `status = "insufficient_evidence"`. This is the
-  hallucination-prevention exit — we refuse to ship an answer the critic
-  doesn't trust.
-- `critique → finalize → END` when grounding clears the threshold; `finalize`
+  clears citations, and sets `status = "insufficient_evidence"`. The
+  fallback `reason` field distinguishes `no_retrieved_context`,
+  `low_per_claim_grounding`, and `low_grounding_after_retry`.
+- `critique → finalize → END` when both checks pass; `finalize`
   marks `status = "ok"`.
+
+## Per-Claim Grounding
+
+The critic does two things, in order:
+
+1. **Overall grounding** — the legacy `verify_answer_confidence` heuristic
+   computes a single score for the whole answer (citation density, term
+   overlap with all retrieved context, uncertainty hedging).
+2. **Per-claim grounding** — `verify_claims` splits the answer into
+   sentences, parses each sentence's `[n]` citations, and checks whether
+   the cited chunks actually contain the sentence's content terms. Each
+   claim gets a `support_score` (term overlap with cited chunks) and an
+   `is_grounded` flag (`support_score ≥ claim_support_threshold` AND at
+   least one cited index is in range). `grounded_claim_rate` is the
+   fraction of claims that are grounded.
+
+The answer prompt now requires a `[n]` citation on every factual sentence
+and forbids citing chunk numbers outside the provided context. The
+per-claim check catches the failure mode the prompt can't prevent: the
+model citing a real chunk that doesn't actually support the sentence.
+
+`ENFORCE_PER_CLAIM_CITATIONS=false` skips the claim-rate gate entirely;
+the per-claim report is still computed and surfaced for visibility but
+won't cause routing changes.
 
 `rewrite` is a deterministic pseudo-relevance-feedback step: it keeps the user's
 original question intact and appends novel high-frequency terms mined from the
