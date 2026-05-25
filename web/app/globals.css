@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: oklch(98.5% 0.003 240);
+  --color-bg-elev: oklch(100% 0 0);
+  --color-bg-sunken: oklch(96% 0.004 240);
+  --color-fg: oklch(20% 0.02 270);
+  --color-fg-muted: oklch(50% 0.015 270);
+  --color-fg-subtle: oklch(70% 0.01 270);
+  --color-border: oklch(91% 0.005 240);
+  --color-border-strong: oklch(82% 0.008 240);
+  --color-accent: oklch(57% 0.13 190);
+  --color-accent-fg: oklch(98% 0 0);
+  --color-success: oklch(60% 0.15 150);
+  --color-warning: oklch(70% 0.16 60);
+  --color-danger: oklch(58% 0.2 25);
+
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+
+  --radius-card: 8px;
+  --radius-input: 8px;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+    --color-bg: oklch(15% 0.018 270);
+    --color-bg-elev: oklch(20% 0.02 270);
+    --color-bg-sunken: oklch(12% 0.015 270);
+    --color-fg: oklch(96% 0.005 240);
+    --color-fg-muted: oklch(72% 0.012 240);
+    --color-fg-subtle: oklch(55% 0.012 240);
+    --color-border: oklch(28% 0.012 270);
+    --color-border-strong: oklch(38% 0.015 270);
+    --color-accent: oklch(72% 0.14 190);
+    --color-accent-fg: oklch(15% 0.02 270);
+    --color-success: oklch(72% 0.15 150);
+    --color-warning: oklch(78% 0.16 60);
+    --color-danger: oklch(72% 0.2 25);
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer utilities {
+  .bg-elev {
+    background: var(--color-bg-elev);
+  }
+  .bg-sunken {
+    background: var(--color-bg-sunken);
+  }
+  .text-muted {
+    color: var(--color-fg-muted);
+  }
+  .text-subtle {
+    color: var(--color-fg-subtle);
+  }
+  .border-strong {
+    border-color: var(--color-border-strong);
+  }
+  .ring-focus {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent), transparent 80%);
+  }
+}

@@ -20,6 +20,20 @@ INSUFFICIENT_EVIDENCE_MESSAGE = (
 )
 
 
+def _append_trace(state: AgentState, node: str, duration_ms: float, **extras) -> list[dict]:
+    """Append a per-node trace entry. Used by the UI's pipeline sidebar."""
+    trace = list(state.get("pipeline_trace") or [])
+    trace.append(
+        {
+            "node": node,
+            "duration_ms": round(duration_ms, 2),
+            "iteration": state.get("iteration", 0),
+            **extras,
+        }
+    )
+    return trace
+
+
 def route_after_critique(state: AgentState, settings: Settings) -> str:
     """Decide what happens after the critic runs.
 
@@ -74,7 +88,17 @@ def build_graph(settings: Settings):
             retrieval_mode=settings.retrieval_mode,
             reranker_mode=settings.reranker_mode,
         )
-        return {**state, "documents": reranked}
+        return {
+            **state,
+            "documents": reranked,
+            "pipeline_trace": _append_trace(
+                state,
+                "retrieve",
+                duration,
+                n_candidates=len(documents),
+                n_reranked=len(reranked),
+            ),
+        }
 
     def answer(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
@@ -99,10 +123,22 @@ def build_graph(settings: Settings):
             model=getattr(llm, "model", "unknown"),
             answer_chars=len(answer_text),
         )
-        return {**state, "answer": answer_text, "citations": citations}
+        return {
+            **state,
+            "answer": answer_text,
+            "citations": citations,
+            "pipeline_trace": _append_trace(
+                state,
+                "answer",
+                duration,
+                model=getattr(llm, "model", "unknown"),
+                answer_chars=len(answer_text),
+            ),
+        }
 
     def critique(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
+        started = now_ms()
         confidence = verify_answer_confidence(state["answer"], state["documents"])
         score = confidence["grounding_score"]
         warnings = list(confidence["warnings"])
@@ -121,6 +157,7 @@ def build_graph(settings: Settings):
             warnings.append("low_per_claim_grounding")
 
         counters().observe("graph.critique.grounded_claim_rate", claim_rate)
+        duration = now_ms() - started
         log_event(
             _logger,
             "graph.critique",
@@ -146,13 +183,23 @@ def build_graph(settings: Settings):
                 }
                 for c in report.claims
             ],
+            "pipeline_trace": _append_trace(
+                state,
+                "critique",
+                duration,
+                grounding_score=score,
+                grounded_claim_rate=claim_rate,
+                n_claims=len(report.claims),
+            ),
         }
 
     def rewrite(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
+        started = now_ms()
         original = state.get("original_question") or state["question"]
         rewritten = rewrite_query(original, state.get("documents", []))
         next_iteration = state.get("iteration", 0) + 1
+        duration = now_ms() - started
         counters().increment("graph.rewrite.invocations")
         counters().observe("graph.iteration", next_iteration)
         log_event(
@@ -166,6 +213,12 @@ def build_graph(settings: Settings):
             **state,
             "question": rewritten,
             "iteration": next_iteration,
+            "pipeline_trace": _append_trace(
+                {**state, "iteration": next_iteration},
+                "rewrite",
+                duration,
+                rewritten_chars=len(rewritten),
+            ),
         }
 
     def fallback(state: AgentState) -> AgentState:
@@ -198,6 +251,7 @@ def build_graph(settings: Settings):
             "status": "insufficient_evidence",
             "warnings": warnings,
             "claim_grounding": [],
+            "pipeline_trace": _append_trace(state, "fallback", 0.0, reason=reason),
         }
 
     def finalize_ok(state: AgentState) -> AgentState:
@@ -210,9 +264,10 @@ def build_graph(settings: Settings):
             grounding_score=state.get("grounding_score", 0.0),
             iteration=state.get("iteration", 0),
         )
+        traced = _append_trace(state, "finalize", 0.0)
         if state.get("status"):
-            return state
-        return {**state, "status": "ok"}
+            return {**state, "pipeline_trace": traced}
+        return {**state, "status": "ok", "pipeline_trace": traced}
 
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve", retrieve)

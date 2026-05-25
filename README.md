@@ -26,6 +26,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 - Sentence Transformers embeddings
 - Ollama local LLM runtime
 - FastAPI
+- Next.js and React for the optional local dashboard
 - Docker and Docker Compose
 - Pytest
 
@@ -51,6 +52,7 @@ A production-shaped Retrieval Augmented Generation project using LangChain, Lang
 │   └── processed        # Generated artifacts
 ├── docs                 # Architecture notes
 ├── scripts              # Operational scripts
+├── web                  # Next.js dashboard for queries, citations, grounding, and metrics
 └── tests
 ```
 
@@ -108,7 +110,20 @@ carries `grounded_claim_rate` and a `claim_grounding` array — one entry per
 sentence in the answer with its parsed citations and per-claim support
 score, so downstream UIs can highlight unsupported claims.
 
-6. Evaluate the engine against a JSONL of cases:
+6. Start the optional dashboard:
+
+```bash
+cd web
+cp .env.local.example .env.local
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. The dashboard proxies `/api/query` and
+`/api/metrics` to FastAPI through `RAG_API_URL`, then shows the answer,
+citations, per-claim grounding, pipeline trace, and runtime counters.
+
+7. Evaluate the engine against a JSONL of cases:
 
 ```bash
 rag-eval --cases data/eval/seed_cases.jsonl --format markdown
@@ -178,4 +193,3 @@ The default setup uses local providers:
 - `LOG_FORMAT=json` (set to `text` for human-readable lines instead)
 
 LangSmith is optional. Enable it only if you want hosted tracing.
-

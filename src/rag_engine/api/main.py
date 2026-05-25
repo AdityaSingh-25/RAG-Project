@@ -5,6 +5,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from rag_engine.agents.graph import build_graph
@@ -23,6 +24,12 @@ configure_tracing(settings)
 _logger = get_logger("rag_engine.api")
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 _graph = None
 _answer_store: CacheStore | None = None
@@ -108,6 +115,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
             "trace_id": trace_id,
             "grounded_claim_rate": 1.0,
             "claim_grounding": [],
+            "pipeline_trace": [],
         }
     )
     duration = now_ms() - started
@@ -132,6 +140,8 @@ def query(request: QueryRequest) -> dict[str, Any]:
         "status": result.get("status") or "ok",
         "grounded_claim_rate": result.get("grounded_claim_rate", 1.0),
         "claim_grounding": result.get("claim_grounding", []),
+        "pipeline_trace": result.get("pipeline_trace", []),
+        "total_duration_ms": round(duration, 2),
     }
     if store is not None and payload["status"] == "ok":
         answer_cache.put(store, request.question, payload)
