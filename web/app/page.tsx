@@ -16,7 +16,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { TraceSidebar } from "@/components/TraceSidebar";
-import { ApiError, getMetrics, runQuery } from "@/lib/api";
+import { ApiError, getMetrics, runQueryStream } from "@/lib/api";
 import type { Citation, MetricsSnapshot, QueryResponse } from "@/lib/types";
 import { cn, formatMs } from "@/lib/utils";
 
@@ -36,7 +36,15 @@ function formatNumber(value: number | undefined): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function statusCopy(response: QueryResponse | null) {
+function statusCopy(response: QueryResponse | null, streaming: boolean) {
+  if (streaming) {
+    return {
+      label: "Streaming",
+      tone: "neutral",
+      detail: "Answer is being generated incrementally",
+      icon: Loader2,
+    };
+  }
   if (!response) {
     return {
       label: "Ready",
@@ -65,6 +73,25 @@ function metricValue(metrics: MetricsSnapshot | null, key: string): string {
   return formatNumber(metrics?.totals[key]);
 }
 
+// Initial response shape while a stream is in flight. Gets fully replaced
+// by the payload from the `done` event.
+function emptyStreamingResponse(): QueryResponse {
+  return {
+    answer: "",
+    citations: [],
+    grounding_score: 0,
+    warnings: [],
+    iteration: 0,
+    status: "ok",
+    grounded_claim_rate: 0,
+    claim_grounding: [],
+    pipeline_trace: [],
+    total_duration_ms: 0,
+    trace_id: "",
+    cached: false,
+  };
+}
+
 function sampleMean(metrics: MetricsSnapshot | null, key: string): string {
   const mean = metrics?.samples[key]?.mean;
   return mean === undefined ? "No samples" : formatMs(mean);
@@ -78,10 +105,11 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [metricsLoading, setMetricsLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const status = useMemo(() => statusCopy(response), [response]);
+  const status = useMemo(() => statusCopy(response, streaming), [response, streaming]);
   const StatusIcon = status.icon;
 
   async function refreshMetrics(signal?: AbortSignal) {
@@ -114,11 +142,39 @@ export default function Home() {
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
+    setStreaming(true);
     setError(null);
+    setResponse(emptyStreamingResponse());
 
     try {
-      const result = await runQuery({ question: trimmed, bypass_cache: bypassCache }, controller.signal);
-      setResponse(result);
+      await runQueryStream(
+        { question: trimmed, bypass_cache: bypassCache },
+        {
+          onTrace: (entry) =>
+            setResponse((prev) =>
+              prev ? { ...prev, pipeline_trace: [...prev.pipeline_trace, entry] } : prev,
+            ),
+          onToken: (delta) =>
+            setResponse((prev) => (prev ? { ...prev, answer: prev.answer + delta } : prev)),
+          onCitations: (citations) =>
+            setResponse((prev) => (prev ? { ...prev, citations } : prev)),
+          onGrounding: (g) =>
+            setResponse((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    grounding_score: g.grounding_score,
+                    grounded_claim_rate: g.grounded_claim_rate,
+                    claim_grounding: g.claim_grounding,
+                    warnings: g.warnings,
+                  }
+                : prev,
+            ),
+          onDone: (payload) => setResponse(payload),
+          onError: (detail) => setError(detail),
+        },
+        controller.signal,
+      );
       refreshMetrics();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -126,12 +182,14 @@ export default function Home() {
       setError(message);
     } finally {
       setLoading(false);
+      setStreaming(false);
     }
   }
 
   function cancel() {
     abortRef.current?.abort();
     setLoading(false);
+    setStreaming(false);
   }
 
   return (
@@ -227,14 +285,14 @@ export default function Home() {
                     status.tone === "neutral" && "bg-sunken text-muted",
                   )}
                 >
-                  <StatusIcon size={18} />
+                  <StatusIcon size={18} className={cn(streaming && "animate-spin")} />
                 </div>
                 <div>
                   <h2 className="font-semibold">{status.label}</h2>
                   <p className="text-sm text-muted">{status.detail}</p>
                 </div>
               </div>
-              {response ? (
+              {response && !streaming && response.trace_id ? (
                 <div className="flex flex-wrap gap-2 text-xs text-muted">
                   <span className="rounded-full border px-2 py-1">Trace {response.trace_id.slice(0, 10)}</span>
                   <span className="rounded-full border px-2 py-1">{formatMs(response.total_duration_ms)}</span>
@@ -243,15 +301,17 @@ export default function Home() {
             </div>
 
             <div className="p-4">
-              {loading && !response ? (
+              {streaming && (!response || response.answer.length === 0) ? (
                 <div className="grid min-h-56 place-items-center rounded-lg border border-dashed bg-sunken text-sm text-muted">
                   <div className="flex items-center gap-2">
                     <Loader2 size={18} className="animate-spin" />
-                    Running retrieval, answer synthesis, and critique
+                    {response && response.pipeline_trace.length > 0
+                      ? `Generating answer · ${response.pipeline_trace[response.pipeline_trace.length - 1].node}`
+                      : "Running retrieval, answer synthesis, and critique"}
                   </div>
                 </div>
               ) : response ? (
-                <AnswerPanel response={response} />
+                <AnswerPanel response={response} streaming={streaming} />
               ) : (
                 <div className="grid min-h-56 place-items-center rounded-lg border border-dashed bg-sunken p-6 text-center">
                   <div>
@@ -279,7 +339,7 @@ export default function Home() {
   );
 }
 
-function AnswerPanel({ response }: { response: QueryResponse }) {
+function AnswerPanel({ response, streaming }: { response: QueryResponse; streaming: boolean }) {
   const handleCitationClick = useCallback((id: number) => {
     const el = document.getElementById(`citation-${id}`);
     if (!el) return;
@@ -291,12 +351,20 @@ function AnswerPanel({ response }: { response: QueryResponse }) {
 
   return (
     <div className="space-y-5">
-      <AnswerWithGrounding
-        answer={response.answer}
-        claims={response.claim_grounding}
-        citations={response.citations}
-        onCitationClick={handleCitationClick}
-      />
+      <div className="relative">
+        <AnswerWithGrounding
+          answer={response.answer}
+          claims={response.claim_grounding}
+          citations={response.citations}
+          onCitationClick={handleCitationClick}
+        />
+        {streaming && (
+          <span
+            aria-hidden
+            className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[2px] animate-pulse bg-accent align-middle"
+          />
+        )}
+      </div>
 
       {response.warnings.length ? (
         <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
