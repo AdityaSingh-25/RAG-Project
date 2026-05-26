@@ -8,6 +8,8 @@ export interface Citation {
   source: string;
   page: number | null;
   score: number | null;
+  /** Truncated chunk content for UI hover previews. ~240 chars max. */
+  content?: string;
 }
 
 export interface ClaimGrounding {

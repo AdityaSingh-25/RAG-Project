@@ -322,9 +322,16 @@ def _answer_prompt(question: str, context: str) -> str:
 
 
 def _citation(document: Document, index: int) -> dict[str, object]:
+    # Truncated content lets the UI render a hover preview without making the
+    # response payload unbounded. Keep this small; the full chunk lives in
+    # Qdrant if a caller really needs it.
+    snippet = document.page_content.strip().replace("\n", " ")
+    if len(snippet) > 240:
+        snippet = snippet[:237] + "…"
     return {
         "id": index,
         "source": document.metadata.get("source", "unknown"),
         "page": document.metadata.get("page"),
         "score": document.metadata.get("score"),
+        "content": snippet,
     }

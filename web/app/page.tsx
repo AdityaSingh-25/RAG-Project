@@ -15,11 +15,12 @@ import {
   Sparkles,
   XCircle,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ApiError, getMetrics, runQuery } from "@/lib/api";
-import type { Citation, ClaimGrounding, MetricsSnapshot, PipelineTraceEntry, QueryResponse } from "@/lib/types";
+import type { Citation, MetricsSnapshot, PipelineTraceEntry, QueryResponse } from "@/lib/types";
 import { cn, formatMs } from "@/lib/utils";
 
 const exampleQuestions = [
@@ -292,11 +293,23 @@ export default function Home() {
 }
 
 function AnswerPanel({ response }: { response: QueryResponse }) {
+  const handleCitationClick = useCallback((id: number) => {
+    const el = document.getElementById(`citation-${id}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Brief highlight so the eye lands on the right row.
+    el.classList.add("citation-flash");
+    window.setTimeout(() => el.classList.remove("citation-flash"), 1100);
+  }, []);
+
   return (
     <div className="space-y-5">
-      <div className="text-sm">
-        <p className="whitespace-pre-wrap leading-7">{response.answer}</p>
-      </div>
+      <AnswerWithGrounding
+        answer={response.answer}
+        claims={response.claim_grounding}
+        citations={response.citations}
+        onCitationClick={handleCitationClick}
+      />
 
       {response.warnings.length ? (
         <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
@@ -315,7 +328,6 @@ function AnswerPanel({ response }: { response: QueryResponse }) {
       ) : null}
 
       <Citations citations={response.citations} />
-      <Claims claims={response.claim_grounding} />
     </div>
   );
 }
@@ -330,13 +342,25 @@ function Citations({ citations }: { citations: Citation[] }) {
       {citations.length ? (
         <div className="mt-3 grid gap-2">
           {citations.map((citation) => (
-            <div key={`${citation.id}-${citation.source}`} className="rounded-lg border bg-sunken p-3">
+            <div
+              key={`${citation.id}-${citation.source}`}
+              id={`citation-${citation.id}`}
+              className="scroll-mt-24 rounded-lg border bg-sunken p-3 transition-colors"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-sm font-medium">[{citation.id}] {citation.source}</div>
-                  <div className="mt-1 text-xs text-muted">
-                    Page {citation.page ?? "unknown"} · Score {citation.score === null ? "n/a" : citation.score.toFixed(3)}
+                  <div className="text-sm font-medium">
+                    [{citation.id}] {citation.source}
                   </div>
+                  <div className="mt-1 text-xs text-muted">
+                    Page {citation.page ?? "unknown"} · Score{" "}
+                    {citation.score === null ? "n/a" : citation.score.toFixed(3)}
+                  </div>
+                  {citation.content && (
+                    <p className="mt-2 font-mono text-[12px] leading-snug text-muted">
+                      {citation.content}
+                    </p>
+                  )}
                 </div>
                 <Database size={16} className="shrink-0 text-subtle" />
               </div>
@@ -345,50 +369,6 @@ function Citations({ citations }: { citations: Citation[] }) {
         </div>
       ) : (
         <p className="mt-2 rounded-lg border border-dashed bg-sunken p-3 text-sm text-muted">No citations were returned.</p>
-      )}
-    </section>
-  );
-}
-
-function Claims({ claims }: { claims: ClaimGrounding[] }) {
-  return (
-    <section>
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold">Per-Claim Grounding</h3>
-        <span className="text-xs text-muted">{claims.length} claims</span>
-      </div>
-      {claims.length ? (
-        <div className="mt-3 overflow-hidden rounded-lg border">
-          {claims.map((claim, index) => (
-            <div key={`${claim.sentence}-${index}`} className="grid gap-2 border-b p-3 last:border-b-0 sm:grid-cols-[1fr_120px]">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-xs font-medium">
-                  {claim.is_grounded ? (
-                    <span className="inline-flex items-center gap-1 text-success">
-                      <CheckCircle2 size={14} />
-                      Grounded
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 text-warning">
-                      <AlertTriangle size={14} />
-                      Needs review
-                    </span>
-                  )}
-                  <span className="text-muted">Cites [{claim.cited_indices.join(", ") || "none"}]</span>
-                </div>
-                <p className="mt-1 break-words text-sm leading-6">{claim.sentence}</p>
-              </div>
-              <div className="sm:text-right">
-                <div className="text-sm font-semibold">{percent(claim.support_score)}</div>
-                <div className="mt-1 h-2 overflow-hidden rounded-full bg-sunken">
-                  <div className="h-full bg-accent" style={{ width: `${Math.max(4, Math.min(100, claim.support_score * 100))}%` }} />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="mt-2 rounded-lg border border-dashed bg-sunken p-3 text-sm text-muted">No claim-level report for this response.</p>
       )}
     </section>
   );
