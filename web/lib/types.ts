@@ -60,3 +60,12 @@ export interface MetricsSnapshot {
     }
   >;
 }
+
+export interface IngestRequest {
+  source_path: string;
+}
+
+export interface IngestResponse {
+  ingested_chunks: number;
+  duplicates_removed: number;
+}
