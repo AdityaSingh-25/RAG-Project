@@ -19,6 +19,26 @@ INSUFFICIENT_EVIDENCE_MESSAGE = (
     "Insufficient evidence to answer confidently from the retrieved context."
 )
 
+# Channel name used to emit per-token deltas via langgraph's "custom" stream.
+# The SSE bridge in api/main.py looks for this exact key.
+ANSWER_TOKEN_CHANNEL = "answer.token"
+
+
+def _stream_writer():
+    """Return langgraph's stream writer, or a no-op outside a streaming context.
+
+    When the graph is driven by `astream(..., stream_mode=["custom", ...])`
+    the writer forwards tokens to the SSE bridge; when driven by `invoke()`
+    (legacy `/query`, tests), there's no writer in scope and we fall through
+    to a no-op so the node behaves identically.
+    """
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except Exception:
+        return lambda _payload: None
+
 
 def _append_trace(state: AgentState, node: str, duration_ms: float, **extras) -> list[dict]:
     """Append a per-node trace entry. Used by the UI's pipeline sidebar."""
@@ -110,8 +130,17 @@ def build_graph(settings: Settings):
         )
         context = _format_context(sorted_documents, settings)
         llm = router.for_question(state["question"], context)
-        response = llm.invoke(_answer_prompt(state["question"], context))
-        answer_text = getattr(response, "content", str(response))
+        prompt = _answer_prompt(state["question"], context)
+
+        writer = _stream_writer()
+        chunks: list[str] = []
+        for chunk in llm.stream(prompt):
+            delta = getattr(chunk, "content", "") or ""
+            if delta:
+                chunks.append(delta)
+                writer({ANSWER_TOKEN_CHANNEL: delta})
+        answer_text = "".join(chunks)
+
         citations = [_citation(doc, index) for index, doc in enumerate(sorted_documents, start=1)]
         duration = now_ms() - started
         counters().observe("graph.answer.latency_ms", duration)
