@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   BarChart3,
   CheckCircle2,
-  ChevronRight,
   Clock3,
   Database,
   FileText,
@@ -19,8 +18,9 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { TraceSidebar } from "@/components/TraceSidebar";
 import { ApiError, getMetrics, runQuery } from "@/lib/api";
-import type { Citation, MetricsSnapshot, PipelineTraceEntry, QueryResponse } from "@/lib/types";
+import type { Citation, MetricsSnapshot, QueryResponse } from "@/lib/types";
 import { cn, formatMs } from "@/lib/utils";
 
 const exampleQuestions = [
@@ -285,7 +285,11 @@ export default function Home() {
         <aside className="space-y-5">
           <HealthCard response={response} metrics={metrics} metricsError={metricsError} metricsLoading={metricsLoading} />
           <GroundingCard response={response} />
-          <TraceCard trace={response?.pipeline_trace ?? []} />
+          <TraceSidebar
+            trace={response?.pipeline_trace ?? []}
+            loading={loading}
+            totalDurationMs={response?.total_duration_ms}
+          />
         </aside>
       </div>
     </main>
@@ -453,46 +457,3 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
   );
 }
 
-function TraceCard({ trace }: { trace: PipelineTraceEntry[] }) {
-  return (
-    <section className="rounded-lg border bg-elev p-4 shadow-sm">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="font-semibold">Pipeline Trace</h2>
-        <span className="text-xs text-muted">{trace.length} nodes</span>
-      </div>
-      {trace.length ? (
-        <div className="mt-4 space-y-2">
-          {trace.map((entry, index) => (
-            <TraceRow key={`${entry.node}-${index}`} entry={entry} />
-          ))}
-        </div>
-      ) : (
-        <p className="mt-3 rounded-lg border border-dashed bg-sunken p-3 text-sm text-muted">Trace entries will appear after a query.</p>
-      )}
-    </section>
-  );
-}
-
-function TraceRow({ entry }: { entry: PipelineTraceEntry }) {
-  const extras = Object.entries(entry).filter(([key]) => !["node", "duration_ms", "iteration"].includes(key));
-
-  return (
-    <div className="rounded-lg border bg-sunken p-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <ChevronRight size={15} className="shrink-0 text-subtle" />
-          <span className="truncate text-sm font-medium capitalize">{entry.node}</span>
-        </div>
-        <span className="shrink-0 text-xs text-muted">{formatMs(entry.duration_ms)}</span>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1">
-        <span className="rounded-full border px-2 py-0.5 text-xs text-muted">iter {entry.iteration}</span>
-        {extras.slice(0, 3).map(([key, value]) => (
-          <span key={key} className="max-w-full truncate rounded-full border px-2 py-0.5 text-xs text-muted">
-            {key}: {String(value)}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
