@@ -8,16 +8,13 @@ import {
   Database,
   FileText,
   Loader2,
-  RefreshCw,
   Send,
-  ShieldCheck,
   Sparkles,
   XCircle,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { TraceSidebar } from "@/components/TraceSidebar";
 import { ApiError, getMetrics, runQuery } from "@/lib/api";
 import type { Citation, MetricsSnapshot, QueryResponse } from "@/lib/types";
@@ -139,29 +136,15 @@ export default function Home() {
 
   return (
     <main className="min-h-screen">
-      <header className="border-b bg-elev/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-medium text-accent">
-              <ShieldCheck size={16} />
-              Multi-Agent RAG Intelligence Engine
-            </div>
-            <h1 className="mt-1 truncate text-xl font-semibold tracking-normal sm:text-2xl">Grounded query workspace</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => refreshMetrics()}
-              className="inline-flex h-9 items-center gap-2 rounded-lg border bg-elev px-3 text-sm font-medium transition-colors hover:border-strong disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={metricsLoading}
-            >
-              <RefreshCw size={15} className={cn(metricsLoading && "animate-spin")} />
-              Metrics
-            </button>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
+      <div className="mx-auto max-w-7xl px-4 pt-6 pb-2 sm:px-6 lg:px-8">
+        <h1 className="text-xl font-semibold tracking-normal sm:text-2xl">
+          Grounded query workspace
+        </h1>
+        <p className="text-muted mt-1 text-sm">
+          Hybrid retrieval, neural reranking, per-claim grounding, and an explicit
+          insufficient-evidence exit.
+        </p>
+      </div>
 
       <div className="mx-auto grid max-w-7xl gap-5 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_360px] lg:px-8">
         <section className="space-y-5">

@@ -2,7 +2,13 @@
 // to FastAPI so the browser never speaks to the backend directly — this keeps
 // the API URL out of the bundle and makes CORS a non-issue.
 
-import type { MetricsSnapshot, QueryRequest, QueryResponse } from "./types";
+import type {
+  IngestRequest,
+  IngestResponse,
+  MetricsSnapshot,
+  QueryRequest,
+  QueryResponse,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, public status: number) {
@@ -32,4 +38,17 @@ export async function runQuery(req: QueryRequest, signal?: AbortSignal): Promise
 export async function getMetrics(signal?: AbortSignal): Promise<MetricsSnapshot> {
   const res = await fetch("/api/metrics", { signal, cache: "no-store" });
   return jsonOrThrow<MetricsSnapshot>(res);
+}
+
+export async function runIngest(
+  req: IngestRequest,
+  signal?: AbortSignal,
+): Promise<IngestResponse> {
+  const res = await fetch("/api/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  return jsonOrThrow<IngestResponse>(res);
 }
