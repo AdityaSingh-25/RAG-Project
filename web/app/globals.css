@@ -78,3 +78,25 @@
     box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent), transparent 80%);
   }
 }
+
+/* Brief flash when a citation chip is clicked. The class is added in JS and
+   removed ~1s later, so the keyframe runs exactly once. */
+@keyframes citation-flash {
+  0%, 100% {
+    background-color: var(--color-bg-sunken);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  20% {
+    background-color: color-mix(in oklch, var(--color-accent), transparent 80%);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent), transparent 70%);
+  }
+}
+
+.citation-flash {
+  animation: citation-flash 1s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
