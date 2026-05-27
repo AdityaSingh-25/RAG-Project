@@ -17,7 +17,13 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { TraceSidebar } from "@/components/TraceSidebar";
 import { ApiError, getMetrics, runQueryStream } from "@/lib/api";
-import type { Citation, MetricsSnapshot, QueryResponse } from "@/lib/types";
+import type {
+  Citation,
+  ClaimVerifierMode,
+  MetricsSnapshot,
+  QueryRequest,
+  QueryResponse,
+} from "@/lib/types";
 import { cn, formatMs } from "@/lib/utils";
 
 const exampleQuestions = [
@@ -100,6 +106,13 @@ function sampleMean(metrics: MetricsSnapshot | null, key: string): string {
 export default function Home() {
   const [question, setQuestion] = useState(exampleQuestions[0]);
   const [bypassCache, setBypassCache] = useState(false);
+  // "default" leaves the field off the request so the API falls back to the
+  // deployment-level Settings value. Explicit choices override that.
+  const [verifierOverride, setVerifierOverride] =
+    useState<"default" | ClaimVerifierMode>("default");
+  const [structuredOverride, setStructuredOverride] =
+    useState<"default" | "off" | "on">("default");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [response, setResponse] = useState<QueryResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,9 +159,20 @@ export default function Home() {
     setError(null);
     setResponse(emptyStreamingResponse());
 
+    const request: QueryRequest = {
+      question: trimmed,
+      bypass_cache: bypassCache,
+    };
+    if (verifierOverride !== "default") {
+      request.claim_verifier_mode = verifierOverride;
+    }
+    if (structuredOverride !== "default") {
+      request.structured_answers = structuredOverride === "on";
+    }
+
     try {
       await runQueryStream(
-        { question: trimmed, bypass_cache: bypassCache },
+        request,
         {
           onTrace: (entry) =>
             setResponse((prev) =>
@@ -262,6 +286,14 @@ export default function Home() {
                 </button>
               ))}
             </div>
+            <AdvancedOptions
+              open={advancedOpen}
+              onToggle={() => setAdvancedOpen((v) => !v)}
+              verifier={verifierOverride}
+              onVerifierChange={setVerifierOverride}
+              structured={structuredOverride}
+              onStructuredChange={setStructuredOverride}
+            />
           </form>
 
           {error ? (
@@ -491,6 +523,120 @@ function GroundingCard({ response }: { response: QueryResponse | null }) {
         <ScoreBar label="Grounded claims" value={claimRate} />
       </div>
     </section>
+  );
+}
+
+/** Collapsible per-request overrides for backend opt-in features. */
+function AdvancedOptions({
+  open,
+  onToggle,
+  verifier,
+  onVerifierChange,
+  structured,
+  onStructuredChange,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  verifier: "default" | ClaimVerifierMode;
+  onVerifierChange: (v: "default" | ClaimVerifierMode) => void;
+  structured: "default" | "off" | "on";
+  onStructuredChange: (v: "default" | "off" | "on") => void;
+}) {
+  const dirty =
+    verifier !== "default" || structured !== "default";
+  return (
+    <div className="mt-3 border-t pt-3">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="text-muted hover:text-[var(--color-fg)] inline-flex items-center gap-1.5 text-xs font-medium transition-colors"
+        aria-expanded={open}
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        Advanced
+        {dirty && (
+          <span
+            className="ml-1 inline-block h-1.5 w-1.5 rounded-full"
+            style={{ background: "var(--color-accent)" }}
+            aria-label="Per-request overrides active"
+          />
+        )}
+      </button>
+      {open && (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <OverridePicker
+            label="Per-claim verifier"
+            value={verifier}
+            options={[
+              { value: "default", label: "Default" },
+              { value: "overlap", label: "Overlap" },
+              { value: "nli", label: "NLI" },
+            ]}
+            onChange={(v) => onVerifierChange(v as "default" | ClaimVerifierMode)}
+            hint="NLI uses an entailment cross-encoder. ~700MB model; loads once."
+          />
+          <OverridePicker
+            label="Structured answers"
+            value={structured}
+            options={[
+              { value: "default", label: "Default" },
+              { value: "off", label: "Off" },
+              { value: "on", label: "On" },
+            ]}
+            onChange={(v) => onStructuredChange(v as "default" | "off" | "on")}
+            hint="On = LLM emits per-claim JSON via function calling. Disables token streaming."
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Compact segmented control for one tri-state override. */
+function OverridePicker({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (v: string) => void;
+  hint?: string;
+}) {
+  return (
+    <div>
+      <div className="text-muted text-xs font-medium">{label}</div>
+      <div className="bg-sunken mt-1.5 inline-flex rounded-md border p-0.5">
+        {options.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onChange(opt.value)}
+              aria-pressed={active}
+              className={cn(
+                "rounded px-2.5 py-1 text-xs font-medium transition-colors",
+                active
+                  ? "bg-elev shadow-sm"
+                  : "text-muted hover:text-[var(--color-fg)]",
+              )}
+              style={
+                active ? { color: "var(--color-accent)" } : undefined
+              }
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+      {hint && (
+        <p className="text-subtle mt-1.5 text-[11px] leading-snug">{hint}</p>
+      )}
+    </div>
   );
 }
 

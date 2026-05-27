@@ -3,7 +3,7 @@ import logging
 import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -54,6 +54,11 @@ class QueryRequest(BaseModel):
     question: str = Field(min_length=3)
     filters: dict[str, Any] | None = None
     bypass_cache: bool = False
+    # Optional per-request overrides of the corresponding Settings fields.
+    # ``None`` means "use the deployment default" — keeps the API surface
+    # unchanged for callers that don't care.
+    claim_verifier_mode: Literal["overlap", "nli"] | None = None
+    structured_answers: bool | None = None
 
 
 class IngestRequest(BaseModel):
@@ -99,24 +104,7 @@ async def query(request: QueryRequest) -> dict[str, Any]:
         )
         raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
 
-    result = await graph.ainvoke(
-        {
-            "question": request.question,
-            "original_question": request.question,
-            "filters": request.filters or {},
-            "documents": [],
-            "answer": "",
-            "citations": [],
-            "grounding_score": 0.0,
-            "warnings": [],
-            "iteration": 0,
-            "status": "",
-            "trace_id": trace_id,
-            "grounded_claim_rate": 1.0,
-            "claim_grounding": [],
-            "pipeline_trace": [],
-        }
-    )
+    result = await graph.ainvoke(_initial_state(request, trace_id))
     duration = now_ms() - started
     counters().observe("api.query.latency_ms", duration)
     counters().increment(f"api.query.status.{result.get('status') or 'ok'}")
@@ -152,11 +140,11 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _initial_state(question: str, filters: dict[str, Any], trace_id: str) -> dict[str, Any]:
+def _initial_state(request: QueryRequest, trace_id: str) -> dict[str, Any]:
     return {
-        "question": question,
-        "original_question": question,
-        "filters": filters,
+        "question": request.question,
+        "original_question": request.question,
+        "filters": request.filters or {},
         "documents": [],
         "answer": "",
         "citations": [],
@@ -168,6 +156,10 @@ def _initial_state(question: str, filters: dict[str, Any], trace_id: str) -> dic
         "grounded_claim_rate": 1.0,
         "claim_grounding": [],
         "pipeline_trace": [],
+        # Per-request overrides — None means "use settings default". The
+        # graph nodes resolve these via _effective_settings.
+        "override_claim_verifier_mode": request.claim_verifier_mode,
+        "override_structured_answers": request.structured_answers,
     }
 
 
@@ -217,7 +209,7 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
         )
         raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
 
-    initial = _initial_state(request.question, request.filters or {}, trace_id)
+    initial = _initial_state(request, trace_id)
 
     async def gen():
         started = now_ms()
