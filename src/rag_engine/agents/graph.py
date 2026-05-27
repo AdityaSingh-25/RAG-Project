@@ -3,7 +3,7 @@ from langgraph.graph import END, StateGraph
 
 from rag_engine.agents.state import AgentState
 from rag_engine.config.settings import Settings
-from rag_engine.evaluation.claim_grounding import verify_claims
+from rag_engine.evaluation.claim_grounding import verify_claims_with_settings
 from rag_engine.evaluation.hallucination import verify_answer_confidence
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import get_logger, log_event, now_ms
@@ -172,10 +172,10 @@ def build_graph(settings: Settings):
         score = confidence["grounding_score"]
         warnings = list(confidence["warnings"])
 
-        report = verify_claims(
+        report = verify_claims_with_settings(
             state["answer"],
             state["documents"],
-            support_threshold=settings.claim_support_threshold,
+            settings,
         )
         claim_rate = report.grounded_claim_rate
         if (
