@@ -6,16 +6,17 @@ Ollama. Adding a Redis dependency for caches that are inherently throwaway
 isn't worth the operational cost. SQLite gives us atomic writes, a single
 file we can ``rm`` to reset, and zero new processes.
 
-The store is thread-safe via short-lived connections per call. Each row is
-keyed by ``(namespace, key)`` so multiple cache wrappers can share one file
-without name collisions.
+Concurrency model: each call opens its own short-lived connection. WAL
+journaling (enabled on every connection) lets readers proceed in parallel
+with one writer at the SQLite layer, so we don't hold a Python lock — that
+would re-serialise every read and undo the point of WAL. SQLite serialises
+concurrent writers internally with a busy-wait up to ``timeout`` seconds.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -37,20 +38,22 @@ class CacheStore:
     def __init__(self, path: Path, default_ttl_seconds: int) -> None:
         self.path = path
         self.default_ttl_seconds = default_ttl_seconds
-        self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
+        # WAL lets readers run alongside one writer and persists per-file once
+        # set; re-applying on every connect is cheap and keeps the invariant
+        # explicit even if a sibling process opened the file in rollback mode.
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def get(self, namespace: str, key: str) -> Any | None:
         """Return the cached value or ``None`` if the row is missing or expired."""
         now = time.time()
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT value, expires_at FROM cache WHERE namespace = ? AND key = ?",
                 (namespace, key),
@@ -73,7 +76,7 @@ class CacheStore:
         ttl = self.default_ttl_seconds if ttl_seconds is None else ttl_seconds
         expires_at = time.time() + ttl
         blob = json.dumps(value, default=_json_default)
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO cache (namespace, key, value, expires_at) "
                 "VALUES (?, ?, ?, ?)",
@@ -82,7 +85,7 @@ class CacheStore:
             conn.commit()
 
     def delete(self, namespace: str, key: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM cache WHERE namespace = ? AND key = ?",
                 (namespace, key),
@@ -90,7 +93,7 @@ class CacheStore:
             conn.commit()
 
     def clear(self, namespace: str | None = None) -> int:
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             if namespace is None:
                 cursor = conn.execute("DELETE FROM cache")
             else:
@@ -100,7 +103,7 @@ class CacheStore:
 
     def purge_expired(self) -> int:
         now = time.time()
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             cursor = conn.execute("DELETE FROM cache WHERE expires_at <= ?", (now,))
             conn.commit()
             return cursor.rowcount
