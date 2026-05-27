@@ -161,3 +161,41 @@ def verify_claims(
     grounded = sum(1 for c in claims if c.is_grounded)
     rate = grounded / len(claims)
     return ClaimReport(claims=claims, grounded_claim_rate=round(rate, 3))
+
+
+def verify_claims_with_settings(
+    answer: str,
+    documents: list[Document],
+    settings,
+) -> ClaimReport:
+    """Settings-aware dispatcher that picks the overlap or NLI scorer.
+
+    Imported lazily so ``claim_verifier_mode = "overlap"`` deployments never
+    touch the sentence-transformers / NLI model machinery.
+    """
+    if not answer.strip():
+        return ClaimReport(claims=[], grounded_claim_rate=0.0)
+    sentences = split_into_sentences(answer)
+    if not sentences:
+        return ClaimReport(claims=[], grounded_claim_rate=0.0)
+
+    threshold = settings.claim_support_threshold
+    if settings.claim_verifier_mode == "nli":
+        from rag_engine.evaluation.nli_verifier import (
+            load_nli_with_cache,
+            score_claim_nli,
+        )
+
+        scorer = load_nli_with_cache(
+            model_name=settings.nli_model,
+            cache_enabled=settings.cache_enabled,
+            cache_path=settings.cache_path,
+            cache_ttl_seconds=settings.cache_ttl_seconds,
+        )
+        claims = [score_claim_nli(s, documents, threshold, scorer) for s in sentences]
+    else:
+        claims = [score_claim(s, documents, threshold) for s in sentences]
+
+    grounded = sum(1 for c in claims if c.is_grounded)
+    rate = grounded / len(claims)
+    return ClaimReport(claims=claims, grounded_claim_rate=round(rate, 3))

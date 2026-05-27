@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     enforce_per_claim_citations: bool = True
     claim_support_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     min_grounded_claim_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+    # "overlap" is the term-overlap heuristic (no model download).
+    # "nli" runs a cross-encoder NLI model over (chunk, claim) pairs and
+    # interprets claim_support_threshold as a P(entailment) floor.
+    claim_verifier_mode: Literal["overlap", "nli"] = "overlap"
+    nli_model: str = "cross-encoder/nli-deberta-v3-base"
 
     retrieval_mode: Literal["dense", "hybrid"] = "hybrid"
     bm25_index_path: str = "data/processed/bm25_index.pkl"
