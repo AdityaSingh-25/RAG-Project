@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     token_encoding: str = "cl100k_base"
     chunk_size: int = Field(default=900, ge=200)
     chunk_overlap: int = Field(default=120, ge=0)
+    # "recursive" uses character/separator boundaries (cheap, default).
+    # "semantic" embeds sentences and breaks where similarity drops — slower,
+    # but produces topic-coherent chunks. Costs ~one embedding call per
+    # sentence at ingest time.
+    chunking_mode: Literal["recursive", "semantic"] = "recursive"
+    semantic_breakpoint_type: Literal[
+        "percentile", "standard_deviation", "interquartile", "gradient"
+    ] = "percentile"
     top_k: int = Field(default=6, ge=1, le=25)
     retrieve_k: int = Field(default=20, ge=1, le=100)
     max_context_tokens: int = Field(default=6000, ge=1000)
@@ -45,6 +53,11 @@ class Settings(BaseSettings):
     enforce_per_claim_citations: bool = True
     claim_support_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     min_grounded_claim_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+    # When True, the answer node uses ChatOllama.with_structured_output to
+    # force a {claims: [{text, citations[]}]} JSON shape via the model's
+    # function-call API. Makes per-claim citation parsing exact instead of
+    # regex-based. Trade-off: bypasses token streaming.
+    structured_answers: bool = False
     # "overlap" is the term-overlap heuristic (no model download).
     # "nli" runs a cross-encoder NLI model over (chunk, claim) pairs and
     # interprets claim_support_threshold as a P(entailment) floor.
