@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from rag_engine.chunking.semantic import chunk_documents
+from rag_engine.chunking.semantic import chunk_documents_with_settings
 from rag_engine.config.settings import Settings
 from rag_engine.ingestion.dedup import dedupe_chunks
 from rag_engine.ingestion.loaders import load_documents
@@ -17,7 +17,7 @@ class IngestReport:
 
 def ingest_path(source: Path, settings: Settings) -> IngestReport:
     documents = load_documents(source)
-    chunks = chunk_documents(documents, settings.chunk_size, settings.chunk_overlap)
+    chunks = chunk_documents_with_settings(documents, settings)
     if not chunks:
         return IngestReport(indexed=0, duplicates_removed=0)
 

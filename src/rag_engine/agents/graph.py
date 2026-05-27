@@ -132,14 +132,10 @@ def build_graph(settings: Settings):
         llm = router.for_question(state["question"], context)
         prompt = _answer_prompt(state["question"], context)
 
-        writer = _stream_writer()
-        chunks: list[str] = []
-        for chunk in llm.stream(prompt):
-            delta = getattr(chunk, "content", "") or ""
-            if delta:
-                chunks.append(delta)
-                writer({ANSWER_TOKEN_CHANNEL: delta})
-        answer_text = "".join(chunks)
+        if settings.structured_answers:
+            answer_text = _generate_structured(llm, prompt)
+        else:
+            answer_text = _generate_streaming(llm, prompt)
 
         citations = [_citation(doc, index) for index, doc in enumerate(sorted_documents, start=1)]
         duration = now_ms() - started
@@ -331,6 +327,40 @@ def _format_context(documents: list[Document], settings: Settings) -> str:
         parts.append(chunk)
         used_tokens += chunk_tokens
     return "\n".join(parts)
+
+
+def _generate_streaming(llm, prompt: str) -> str:
+    """Default path: stream tokens out via the langgraph custom channel."""
+    writer = _stream_writer()
+    chunks: list[str] = []
+    for chunk in llm.stream(prompt):
+        delta = getattr(chunk, "content", "") or ""
+        if delta:
+            chunks.append(delta)
+            writer({ANSWER_TOKEN_CHANNEL: delta})
+    return "".join(chunks)
+
+
+def _generate_structured(llm, prompt: str) -> str:
+    """Structured-output path: force {claims: [{text, citations[]}]} JSON via
+    the model's function-call API, then flatten back into ``[n]``-marker text
+    so the rest of the pipeline (per-claim verifier, frontend) is unchanged.
+
+    Token streaming is bypassed in this mode — the model emits the JSON
+    object atomically.
+    """
+    from rag_engine.agents.structured_answer import (
+        StructuredAnswer,
+        render_structured_answer,
+    )
+
+    structured_llm = llm.with_structured_output(StructuredAnswer)
+    result = structured_llm.invoke(prompt)
+    if not isinstance(result, StructuredAnswer):
+        # ``with_structured_output`` may return a dict for some backends;
+        # coerce so render_structured_answer works regardless.
+        result = StructuredAnswer.model_validate(result)
+    return render_structured_answer(result)
 
 
 def _answer_prompt(question: str, context: str) -> str:
