@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rag_engine.cache.store import CacheStore
@@ -60,3 +61,35 @@ def test_tuples_are_serialized_as_lists(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.set("ns", "k", ("a", "b"))
     assert store.get("ns", "k") == ["a", "b"]
+
+
+def test_concurrent_reads_and_writes_do_not_error(tmp_path: Path) -> None:
+    """Many threads hammering the same store should never raise.
+
+    WAL mode + per-call connections is what allows this without a Python
+    lock; if the lock got reintroduced reads would still pass but writes
+    would block far more than they need to.
+    """
+    store = _store(tmp_path)
+    n_workers = 16
+    iters_per_worker = 25
+
+    def hammer(worker_id: int) -> int:
+        ok = 0
+        for i in range(iters_per_worker):
+            key = f"w{worker_id}-{i}"
+            store.set("ns", key, {"w": worker_id, "i": i})
+            # Mix in reads from other workers' keys so reader-writer
+            # interleaving is exercised, not just same-key thrash.
+            other = (worker_id + 1) % n_workers
+            store.get("ns", f"w{other}-{i}")
+            value = store.get("ns", key)
+            if value == {"w": worker_id, "i": i}:
+                ok += 1
+        return ok
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        results = [pool.submit(hammer, w) for w in range(n_workers)]
+        totals = [f.result(timeout=30) for f in as_completed(results)]
+
+    assert sum(totals) == n_workers * iters_per_worker

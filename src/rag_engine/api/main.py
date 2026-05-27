@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -33,24 +34,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_graph = None
-_answer_store: CacheStore | None = None
-
-
+# Module-level singletons. ``lru_cache`` gives us a thread-safe first-call
+# initializer — concurrent first requests no longer race into building two
+# graphs (wasteful but not incorrect) or two CacheStore instances pointing
+# at the same SQLite file.
+@lru_cache(maxsize=1)
 def _get_graph():
-    global _graph
-    if _graph is None:
-        _graph = build_graph(settings)
-    return _graph
+    return build_graph(settings)
 
 
+@lru_cache(maxsize=1)
 def _get_answer_store() -> CacheStore | None:
-    global _answer_store
     if not (settings.cache_enabled and settings.answer_cache_enabled):
         return None
-    if _answer_store is None:
-        _answer_store = CacheStore(Path(settings.cache_path), settings.cache_ttl_seconds)
-    return _answer_store
+    return CacheStore(Path(settings.cache_path), settings.cache_ttl_seconds)
 
 
 class QueryRequest(BaseModel):
@@ -74,7 +71,7 @@ def metrics() -> dict[str, Any]:
 
 
 @app.post("/query")
-def query(request: QueryRequest) -> dict[str, Any]:
+async def query(request: QueryRequest) -> dict[str, Any]:
     trace_id = uuid.uuid4().hex
     counters().increment("api.query.total")
     store = _get_answer_store()
@@ -102,7 +99,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
         )
         raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
 
-    result = graph.invoke(
+    result = await graph.ainvoke(
         {
             "question": request.question,
             "original_question": request.question,
