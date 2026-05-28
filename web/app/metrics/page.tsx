@@ -8,8 +8,16 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { LatencyChart } from "@/components/charts/LatencyChart";
+import { Sparkline } from "@/components/charts/Sparkline";
 import { ApiError, getMetrics } from "@/lib/api";
 import type { MetricsSnapshot } from "@/lib/types";
+import {
+  pluckCacheRateSeries,
+  pluckSampleSeries,
+  useMetricsHistory,
+  type HistoryPoint,
+} from "@/lib/useMetricsHistory";
 import { cn, formatMs } from "@/lib/utils";
 
 // Auto-refresh interval. 2s is fast enough to feel live but slow enough
@@ -82,6 +90,7 @@ export default function MetricsPage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
+  const history = useMetricsHistory(snapshot);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -188,15 +197,19 @@ export default function MetricsPage() {
 
       {snapshot && (
         <div className="space-y-8">
+          <QueryLatencyCard history={history} />
+
           {cacheStats.length > 0 && (
-            <CacheSection stats={cacheStats} />
+            <CacheSection stats={cacheStats} history={history} />
           )}
 
           {groups.map((group) => (
             <CounterGroupSection key={group.title} group={group} />
           ))}
 
-          {samples.length > 0 && <LatencySection samples={samples} />}
+          {samples.length > 0 && (
+            <LatencySection samples={samples} history={history} />
+          )}
         </div>
       )}
 
@@ -209,43 +222,86 @@ export default function MetricsPage() {
   );
 }
 
+const QUERY_LATENCY_KEY = "api.query.latency_ms";
+
+function QueryLatencyCard({ history }: { history: HistoryPoint[] }) {
+  const p50 = pluckSampleSeries(history, QUERY_LATENCY_KEY, "p50");
+  const p95 = pluckSampleSeries(history, QUERY_LATENCY_KEY, "p95");
+  const max = pluckSampleSeries(history, QUERY_LATENCY_KEY, "max");
+  const span = windowSpan(history);
+
+  return (
+    <section className="bg-elev rounded-lg border p-4 shadow-sm">
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <div>
+          <SectionTitle>Query latency</SectionTitle>
+          <p className="text-subtle mt-0.5 font-mono text-[11px]">
+            {QUERY_LATENCY_KEY}
+          </p>
+        </div>
+        <span className="text-subtle font-mono text-[10px]">
+          {history.length} samples
+        </span>
+      </div>
+      <LatencyChart
+        series={[
+          { label: "p50", values: p50, color: "var(--color-accent)" },
+          { label: "p95", values: p95, color: "var(--color-warning)" },
+          { label: "max", values: max, color: "var(--color-fg-muted)" },
+        ]}
+        format={(v) => formatMs(v)}
+        xStartLabel={span.startLabel}
+        xEndLabel={span.endLabel}
+        emptyHint="Run a few queries — points show up once the buffer has 2+ samples"
+      />
+    </section>
+  );
+}
+
 function CacheSection({
   stats,
+  history,
 }: {
   stats: Array<{ namespace: string; hits: number; misses: number; rate: number }>;
+  history: HistoryPoint[];
 }) {
   return (
     <section>
       <SectionTitle>Cache hit rates</SectionTitle>
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {stats.map((s) => (
-          <div key={s.namespace} className="bg-elev rounded-lg border p-4">
-            <div className="text-muted text-xs uppercase tracking-wider">
-              {s.namespace.replace(/_/g, " ")}
-            </div>
-            <div className="mt-1 flex items-baseline gap-2">
-              <div
-                className="text-2xl font-semibold"
-                style={{ color: "var(--color-accent)" }}
-              >
-                {(s.rate * 100).toFixed(1)}%
+        {stats.map((s) => {
+          const rateSeries = pluckCacheRateSeries(history, s.namespace);
+          return (
+            <div key={s.namespace} className="bg-elev rounded-lg border p-4">
+              <div className="text-muted text-xs uppercase tracking-wider">
+                {s.namespace.replace(/_/g, " ")}
               </div>
-              <div className="text-subtle font-mono text-[11px]">
-                {formatTotal(s.hits)} hits · {formatTotal(s.misses)} misses
+              <div className="mt-1 flex items-baseline gap-2">
+                <div
+                  className="text-2xl font-semibold"
+                  style={{ color: "var(--color-accent)" }}
+                >
+                  {(s.rate * 100).toFixed(1)}%
+                </div>
+                <div className="text-subtle font-mono text-[11px]">
+                  {formatTotal(s.hits)} hits · {formatTotal(s.misses)} misses
+                </div>
+              </div>
+              <div className="mt-3">
+                <Sparkline
+                  values={rateSeries}
+                  width={220}
+                  height={30}
+                  stroke="var(--color-accent)"
+                  fillOpacity={0.12}
+                  yMin={0}
+                  yMax={1}
+                  className="w-full"
+                />
               </div>
             </div>
-            <div className="bg-sunken mt-3 h-1.5 overflow-hidden rounded-full">
-              <div
-                className="h-full"
-                style={{
-                  width: `${Math.max(2, s.rate * 100)}%`,
-                  background: "var(--color-accent)",
-                  transition: "width 220ms ease",
-                }}
-              />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -288,10 +344,12 @@ function CounterGroupSection({ group }: { group: Group }) {
 
 function LatencySection({
   samples,
+  history,
 }: {
   samples: Array<
     [string, { count: number; mean: number; p50: number; p95: number; max: number }]
   >;
+  history: HistoryPoint[];
 }) {
   return (
     <section>
@@ -306,6 +364,7 @@ function LatencySection({
               <th className="px-3 py-2 text-right font-normal">p50</th>
               <th className="px-3 py-2 text-right font-normal">p95</th>
               <th className="px-3 py-2 text-right font-normal">max</th>
+              <th className="px-3 py-2 text-right font-normal">p95 trend</th>
             </tr>
           </thead>
           <tbody>
@@ -313,6 +372,7 @@ function LatencySection({
               const isLatency = key.endsWith("_ms");
               const fmt = (v: number) =>
                 isLatency ? formatMs(v) : v.toFixed(2);
+              const p95Series = pluckSampleSeries(history, key, "p95");
               return (
                 <tr key={key} className="border-b last:border-b-0">
                   <td className="px-4 py-2.5">
@@ -333,6 +393,20 @@ function LatencySection({
                   <td className="px-3 py-2.5 text-right font-mono tabular-nums">
                     {fmt(s.max)}
                   </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <span
+                      className="inline-block align-middle"
+                      style={{ color: "var(--color-warning)" }}
+                    >
+                      <Sparkline
+                        values={p95Series}
+                        width={90}
+                        height={22}
+                        stroke="currentColor"
+                        yMin={0}
+                      />
+                    </span>
+                  </td>
                 </tr>
               );
             })}
@@ -341,6 +415,27 @@ function LatencySection({
       </div>
     </section>
   );
+}
+
+/** Format start/end labels for the x-axis based on the buffer's timestamps. */
+function windowSpan(history: HistoryPoint[]): {
+  startLabel: string;
+  endLabel: string;
+} {
+  if (history.length < 2) return { startLabel: "", endLabel: "" };
+  const first = history[0].at;
+  const last = history[history.length - 1].at;
+  const spanSec = Math.round((last - first) / 1000);
+  return {
+    startLabel: `${formatRel(spanSec)} ago`,
+    endLabel: "now",
+  };
+}
+
+function formatRel(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
