@@ -103,3 +103,20 @@ export async function runIngest(
   });
   return jsonOrThrow<IngestResponse>(res);
 }
+
+/** Upload files directly. The browser sets the multipart boundary header. */
+export async function runIngestUpload(
+  files: File[],
+  signal?: AbortSignal,
+): Promise<IngestResponse> {
+  const form = new FormData();
+  for (const file of files) {
+    form.append("files", file, file.name);
+  }
+  const res = await fetch("/api/ingest/upload", {
+    method: "POST",
+    body: form,
+    signal,
+  });
+  return jsonOrThrow<IngestResponse>(res);
+}

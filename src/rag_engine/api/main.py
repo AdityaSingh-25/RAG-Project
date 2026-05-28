@@ -1,12 +1,14 @@
 import json
 import logging
+import shutil
 import uuid
 from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -298,6 +300,65 @@ def ingest(request: IngestRequest) -> dict[str, Any]:
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
+    }
+
+
+# Mirrors the suffixes accepted by `_load_file` in ingestion/loaders.py. Kept in
+# the API layer so we can reject unsupported uploads before writing anything to
+# disk — the loader would silently produce zero documents otherwise.
+_ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".csv", ".json", ".txt", ".md", ".rst"}
+
+
+@app.post("/ingest/upload")
+async def ingest_upload(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    trace_id = uuid.uuid4().hex
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    for upload in files:
+        name = upload.filename or ""
+        if not name:
+            raise HTTPException(status_code=400, detail="Uploaded file is missing a name")
+        suffix = Path(name).suffix.lower()
+        if suffix not in _ALLOWED_UPLOAD_SUFFIXES:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported file type {suffix or '(none)'} for {name!r}. "
+                    f"Allowed: {sorted(_ALLOWED_UPLOAD_SUFFIXES)}"
+                ),
+            )
+
+    with TemporaryDirectory(prefix="rag-upload-") as tmp:
+        tmp_path = Path(tmp)
+        for upload in files:
+            # Strip any path components from the client — only keep the basename
+            # so a malicious filename like "../etc/passwd" can't escape the
+            # temp dir. `Path(...).name` returns only the final component.
+            safe_name = Path(upload.filename or "upload").name
+            target = tmp_path / safe_name
+            with target.open("wb") as out:
+                shutil.copyfileobj(upload.file, out)
+            await upload.close()
+        try:
+            report = ingest_path(tmp_path, settings)
+        except Exception as exc:
+            log_event(
+                _logger,
+                "api.ingest.upload.failed",
+                trace_id=trace_id,
+                error=str(exc),
+                file_count=len(files),
+                level=logging.ERROR,
+            )
+            raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
+
+    counters().increment("api.ingest.upload.total")
+    counters().increment("api.ingest.upload.files", amount=len(files))
+    return {
+        "ingested_chunks": report.indexed,
+        "duplicates_removed": report.duplicates_removed,
+        "files_received": len(files),
     }
 
 

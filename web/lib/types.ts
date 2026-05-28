@@ -75,4 +75,6 @@ export interface IngestRequest {
 export interface IngestResponse {
   ingested_chunks: number;
   duplicates_removed: number;
+  /** Only present on the multipart /ingest/upload endpoint. */
+  files_received?: number;
 }
