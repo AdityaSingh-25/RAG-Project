@@ -1,3 +1,5 @@
+from typing import Any
+
 from langchain_core.documents import Document
 from langgraph.graph import END, StateGraph
 
@@ -38,6 +40,25 @@ def _stream_writer():
         return get_stream_writer()
     except Exception:
         return lambda _payload: None
+
+
+def _effective_settings(state: AgentState, settings: Settings) -> Settings:
+    """Apply per-request overrides from ``state`` onto the deployment settings.
+
+    Returns a new Settings instance if any override is set, otherwise the
+    original. ``Settings.model_copy(update=...)`` is the Pydantic way; the
+    underlying TypedDict means a missing key resolves to ``None`` here.
+    """
+    updates: dict[str, Any] = {}
+    mode_override = state.get("override_claim_verifier_mode")
+    if mode_override is not None:
+        updates["claim_verifier_mode"] = mode_override
+    structured_override = state.get("override_structured_answers")
+    if structured_override is not None:
+        updates["structured_answers"] = structured_override
+    if not updates:
+        return settings
+    return settings.model_copy(update=updates)
 
 
 def _append_trace(state: AgentState, node: str, duration_ms: float, **extras) -> list[dict]:
@@ -123,6 +144,7 @@ def build_graph(settings: Settings):
     def answer(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
         started = now_ms()
+        effective = _effective_settings(state, settings)
         sorted_documents = sorted(
             state["documents"],
             key=lambda doc: doc.metadata.get("score", 0),
@@ -132,7 +154,7 @@ def build_graph(settings: Settings):
         llm = router.for_question(state["question"], context)
         prompt = _answer_prompt(state["question"], context)
 
-        if settings.structured_answers:
+        if effective.structured_answers:
             answer_text = _generate_structured(llm, prompt)
         else:
             answer_text = _generate_streaming(llm, prompt)
@@ -164,6 +186,7 @@ def build_graph(settings: Settings):
     def critique(state: AgentState) -> AgentState:
         trace_id = state.get("trace_id", "-")
         started = now_ms()
+        effective = _effective_settings(state, settings)
         confidence = verify_answer_confidence(state["answer"], state["documents"])
         score = confidence["grounding_score"]
         warnings = list(confidence["warnings"])
@@ -171,7 +194,7 @@ def build_graph(settings: Settings):
         report = verify_claims_with_settings(
             state["answer"],
             state["documents"],
-            settings,
+            effective,
         )
         claim_rate = report.grounded_claim_rate
         if (
