@@ -195,7 +195,10 @@ export default function Home() {
                 : prev,
             ),
           onDone: (payload) => setResponse(payload),
-          onError: (detail) => setError(detail),
+          onError: (detail) => {
+            setError(detail);
+            setResponse(null);
+          },
         },
         controller.signal,
       );
@@ -204,6 +207,9 @@ export default function Home() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Query failed";
       setError(message);
+      // The streaming placeholder we set at submit-start would otherwise stay
+      // on screen as a hollow "Grounded Answer" card alongside the error.
+      setResponse(null);
     } finally {
       setLoading(false);
       setStreaming(false);
