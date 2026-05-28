@@ -2,7 +2,6 @@
 
 import {
   ArrowRight,
-  CheckCircle2,
   Circle,
   Loader2,
   RefreshCw,
@@ -18,25 +17,35 @@ interface TraceSidebarProps {
   totalDurationMs?: number;
 }
 
-interface IterationBlock {
-  iteration: number;
-  entries: PipelineTraceEntry[];
-}
-
 const PENDING_STAGES = ["retrieve", "answer", "critique", "finalize"] as const;
 
-function groupByIteration(trace: PipelineTraceEntry[]): IterationBlock[] {
-  if (trace.length === 0) return [];
-  const blocks: IterationBlock[] = [];
-  let current: IterationBlock | null = null;
+interface Row {
+  entry: PipelineTraceEntry;
+  /** Cumulative start time in ms, derived by summing prior durations. */
+  startMs: number;
+  /** True when this row's iteration is the first of a new pass (>0). */
+  startsNewPass: boolean;
+}
+
+/** Annotate each entry with its cumulative start time. Stages are sequential
+ *  in the LangGraph state machine, so start = sum of preceding durations.    */
+function buildRows(trace: PipelineTraceEntry[]): Row[] {
+  const rows: Row[] = [];
+  let cursor = 0;
+  let lastIteration = -1;
   for (const entry of trace) {
-    if (!current || entry.iteration !== current.iteration) {
-      current = { iteration: entry.iteration, entries: [] };
-      blocks.push(current);
-    }
-    current.entries.push(entry);
+    const startsNewPass = entry.iteration !== lastIteration && entry.iteration > 0;
+    rows.push({ entry, startMs: cursor, startsNewPass });
+    cursor += Number(entry.duration_ms) || 0;
+    lastIteration = entry.iteration;
   }
-  return blocks;
+  return rows;
+}
+
+function nodeColor(node: PipelineTraceEntry["node"]): string {
+  if (node === "fallback") return "var(--color-warning)";
+  if (node === "rewrite") return "var(--color-fg-muted)";
+  return "var(--color-accent)";
 }
 
 export function TraceSidebar({
@@ -44,11 +53,15 @@ export function TraceSidebar({
   loading,
   totalDurationMs,
 }: TraceSidebarProps) {
-  const blocks = useMemo(() => groupByIteration(trace), [trace]);
+  const rows = useMemo(() => buildRows(trace), [trace]);
+  const measuredTotal = rows.length
+    ? rows[rows.length - 1].startMs + (Number(rows[rows.length - 1].entry.duration_ms) || 0)
+    : 0;
+  // Prefer the server-reported total when present; otherwise the sum of what
+  // we've seen so far. During streaming totalDurationMs is 0 until `done`.
+  const scaleMs = Math.max(1, totalDurationMs || measuredTotal);
 
-  // Staggered reveal: when ``trace`` changes, fade entries in one at a time.
-  // Cheap way to make a one-shot response feel like watching the engine
-  // execute, without needing real SSE from the backend.
+  // Staggered reveal so streamed entries fade in one at a time.
   const [revealed, setRevealed] = useState(0);
   useEffect(() => {
     setRevealed(0);
@@ -64,9 +77,8 @@ export function TraceSidebar({
       <header className="flex items-center justify-between gap-3">
         <h2 className="font-semibold">Pipeline Trace</h2>
         {trace.length > 0 ? (
-          <span className="text-subtle text-xs">
-            {trace.length} nodes
-            {totalDurationMs ? ` · ${formatMs(totalDurationMs)}` : ""}
+          <span className="text-subtle font-mono text-[11px]">
+            {trace.length} nodes{measuredTotal ? ` · ${formatMs(measuredTotal)}` : ""}
           </span>
         ) : loading ? (
           <Loader2 size={14} className="text-subtle animate-spin" />
@@ -74,22 +86,19 @@ export function TraceSidebar({
       </header>
 
       <div className="mt-4">
-        {trace.length === 0 ? (
+        {rows.length === 0 ? (
           <PreviewStages loading={loading} />
         ) : (
-          blocks.map((block, blockIdx) => (
-            <IterationGroup
-              key={block.iteration}
-              block={block}
-              isRewrite={blockIdx > 0}
-              revealOffset={blocks
-                .slice(0, blockIdx)
-                .reduce((sum, b) => sum + b.entries.length, 0)}
-              revealed={revealed}
-            />
-          ))
+          <Waterfall rows={rows} scaleMs={scaleMs} revealed={revealed} />
         )}
       </div>
+
+      {rows.length > 0 && (
+        <div className="text-subtle mt-2 flex justify-between font-mono text-[10px]">
+          <span>0 ms</span>
+          <span>{formatMs(scaleMs)}</span>
+        </div>
+      )}
     </section>
   );
 }
@@ -102,9 +111,7 @@ function PreviewStages({ loading }: { loading: boolean }) {
         <li
           key={stage}
           className="bg-sunken flex items-center gap-2.5 rounded-md border p-2.5"
-          style={{
-            opacity: loading ? 1 : 0.55,
-          }}
+          style={{ opacity: loading ? 1 : 0.55 }}
         >
           {loading && i === 0 ? (
             <Loader2
@@ -127,42 +134,81 @@ function PreviewStages({ loading }: { loading: boolean }) {
   );
 }
 
-function IterationGroup({
-  block,
-  isRewrite,
-  revealOffset,
+function Waterfall({
+  rows,
+  scaleMs,
   revealed,
 }: {
-  block: IterationBlock;
-  isRewrite: boolean;
-  revealOffset: number;
+  rows: Row[];
+  scaleMs: number;
   revealed: number;
 }) {
   return (
-    <div className="mb-4 last:mb-0">
-      <div className="text-subtle mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest">
-        <span>Pass {block.iteration + 1}</span>
-        {isRewrite && (
-          <>
-            <ArrowRight size={9} className="opacity-60" />
-            <RefreshCw size={9} className="opacity-60" />
-            <span className="opacity-80">after rewrite</span>
-          </>
-        )}
+    <ol className="space-y-1.5">
+      {rows.map((row, i) => {
+        const visible = i < revealed;
+        return (
+          <li
+            key={`${row.entry.node}-${i}`}
+            style={{
+              opacity: visible ? 1 : 0,
+              transform: visible ? "translateY(0)" : "translateY(3px)",
+              transition: "opacity 220ms ease, transform 220ms ease",
+            }}
+          >
+            {row.startsNewPass && (
+              <div className="text-subtle mb-1 mt-2 flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-widest">
+                <ArrowRight size={9} className="opacity-60" />
+                <RefreshCw size={9} className="opacity-60" />
+                <span>pass {row.entry.iteration + 1}</span>
+              </div>
+            )}
+            <WaterfallRow row={row} scaleMs={scaleMs} />
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function WaterfallRow({ row, scaleMs }: { row: Row; scaleMs: number }) {
+  const { entry, startMs } = row;
+  const durationMs = Number(entry.duration_ms) || 0;
+  const leftPct = (startMs / scaleMs) * 100;
+  const widthPct = Math.max(1.5, (durationMs / scaleMs) * 100);
+  const color = nodeColor(entry.node);
+  const title = buildHoverTitle(entry);
+
+  return (
+    <div
+      className="grid items-center gap-2 rounded-md border px-2 py-1.5"
+      style={{
+        background: "var(--color-bg-sunken)",
+        gridTemplateColumns: "64px 1fr 44px",
+      }}
+      title={title}
+    >
+      <span className="text-[12px] font-medium capitalize">{entry.node}</span>
+      <div className="relative h-2.5 overflow-hidden rounded-full">
+        <div
+          className="absolute inset-0"
+          style={{
+            background: "color-mix(in oklch, var(--color-border), transparent 40%)",
+          }}
+        />
+        <div
+          className="absolute top-0 bottom-0 rounded-full"
+          style={{
+            left: `${leftPct}%`,
+            width: `${widthPct}%`,
+            background: color,
+            transition: "left 200ms ease, width 200ms ease",
+          }}
+        />
       </div>
-      <ol className="space-y-1.5 border-l-2 pl-3" style={{ borderColor: "var(--color-border)" }}>
-        {block.entries.map((entry, i) => {
-          const globalIndex = revealOffset + i;
-          const isVisible = globalIndex < revealed;
-          return (
-            <TraceEntryRow
-              key={`${entry.node}-${globalIndex}`}
-              entry={entry}
-              visible={isVisible}
-            />
-          );
-        })}
-      </ol>
+      <span className="text-subtle text-right font-mono text-[10.5px] tabular-nums">
+        {formatMs(durationMs)}
+      </span>
     </div>
   );
 }
@@ -176,6 +222,23 @@ const EXTRA_KEYS_BY_NODE: Record<string, readonly string[]> = {
   finalize: [],
 };
 
+/** Compose a native-tooltip string with the per-node diagnostic fields.
+ *  Sidebar width is too tight to render these inline as before, so they
+ *  live in `title` — keyboard / screen-reader friendly, no JS popover.   */
+function buildHoverTitle(entry: PipelineTraceEntry): string {
+  const lines = [`${entry.node} · ${formatMs(Number(entry.duration_ms) || 0)}`];
+  if (entry.iteration > 0) {
+    lines.push(`iteration ${entry.iteration}`);
+  }
+  const wantedExtras = EXTRA_KEYS_BY_NODE[entry.node] ?? [];
+  for (const k of wantedExtras) {
+    const v = entry[k];
+    if (v === undefined) continue;
+    lines.push(`${k.replace(/_/g, " ")}: ${formatExtra(k, v)}`);
+  }
+  return lines.join("\n");
+}
+
 function formatExtra(key: string, value: unknown): string {
   if (typeof value === "number") {
     if (key === "grounding_score" || key === "grounded_claim_rate") {
@@ -184,53 +247,4 @@ function formatExtra(key: string, value: unknown): string {
     return Number.isInteger(value) ? value.toString() : value.toFixed(2);
   }
   return String(value);
-}
-
-function TraceEntryRow({
-  entry,
-  visible,
-}: {
-  entry: PipelineTraceEntry;
-  visible: boolean;
-}) {
-  const accent =
-    entry.node === "fallback"
-      ? "var(--color-warning)"
-      : entry.node === "rewrite"
-        ? "var(--color-fg-muted)"
-        : "var(--color-accent)";
-  const wantedExtras = EXTRA_KEYS_BY_NODE[entry.node] ?? [];
-  const extras = wantedExtras
-    .map((k) => [k, entry[k]] as const)
-    .filter(([, v]) => v !== undefined);
-
-  return (
-    <li
-      className="bg-sunken rounded-md border p-2.5"
-      style={{
-        opacity: visible ? 1 : 0,
-        transform: visible ? "translateY(0)" : "translateY(4px)",
-        transition: "opacity 220ms ease, transform 220ms ease",
-      }}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <CheckCircle2 size={12} className="shrink-0" style={{ color: accent }} />
-          <span className="text-[13px] font-medium capitalize">{entry.node}</span>
-        </div>
-        <span className="text-subtle shrink-0 font-mono text-[11px]">
-          {formatMs(entry.duration_ms)}
-        </span>
-      </div>
-      {extras.length > 0 && (
-        <div className="text-muted mt-1.5 ml-[20px] flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10.5px]">
-          {extras.map(([k, v]) => (
-            <span key={k}>
-              <span className="text-subtle">{k.replace(/_/g, " ")}</span> {formatExtra(k, v)}
-            </span>
-          ))}
-        </div>
-      )}
-    </li>
-  );
 }
