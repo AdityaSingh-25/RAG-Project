@@ -42,9 +42,16 @@ export interface QueryResponse {
   cached: boolean;
 }
 
+export type ClaimVerifierMode = "overlap" | "nli";
+
 export interface QueryRequest {
   question: string;
   bypass_cache?: boolean;
+  /** Override the deployment-level claim verifier per request.
+   *  Omit (or send `null`) to use the API default. */
+  claim_verifier_mode?: ClaimVerifierMode | null;
+  /** Override the deployment-level structured-answers flag per request. */
+  structured_answers?: boolean | null;
 }
 
 export interface MetricsSnapshot {
