@@ -6,6 +6,8 @@ import { consumeSse } from "./sse";
 import type {
   Citation,
   ClaimGrounding,
+  CorpusSourcesResponse,
+  CorpusStats,
   IngestRequest,
   IngestResponse,
   MetricsSnapshot,
@@ -42,6 +44,18 @@ export async function runQuery(req: QueryRequest, signal?: AbortSignal): Promise
 export async function getMetrics(signal?: AbortSignal): Promise<MetricsSnapshot> {
   const res = await fetch("/api/metrics", { signal, cache: "no-store" });
   return jsonOrThrow<MetricsSnapshot>(res);
+}
+
+export async function getCorpusStats(signal?: AbortSignal): Promise<CorpusStats> {
+  const res = await fetch("/api/corpus/stats", { signal, cache: "no-store" });
+  return jsonOrThrow<CorpusStats>(res);
+}
+
+export async function getCorpusSources(
+  signal?: AbortSignal,
+): Promise<CorpusSourcesResponse> {
+  const res = await fetch("/api/corpus/sources", { signal, cache: "no-store" });
+  return jsonOrThrow<CorpusSourcesResponse>(res);
 }
 
 export interface GroundingEvent {

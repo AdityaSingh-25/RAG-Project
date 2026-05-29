@@ -76,3 +76,18 @@ export interface IngestResponse {
   ingested_chunks: number;
   duplicates_removed: number;
 }
+
+export interface CorpusStats {
+  collection: string;
+  chunks: number;
+  sources: number;
+}
+
+export interface CorpusSource {
+  source: string;
+  chunks: number;
+}
+
+export interface CorpusSourcesResponse {
+  sources: CorpusSource[];
+}

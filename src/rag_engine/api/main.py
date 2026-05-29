@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from qdrant_client import QdrantClient
 
 from rag_engine.agents.graph import ANSWER_TOKEN_CHANNEL, build_graph
 from rag_engine.cache import answer_cache
@@ -50,6 +51,45 @@ def _get_answer_store() -> CacheStore | None:
     return CacheStore(Path(settings.cache_path), settings.cache_ttl_seconds)
 
 
+@lru_cache(maxsize=1)
+def _get_qdrant_client() -> QdrantClient:
+    return QdrantClient(url=settings.qdrant_url)
+
+
+def _aggregate_sources() -> tuple[int, dict[str, int]]:
+    """Walk every point and count chunks per source path.
+
+    Returns ``(total_chunks, by_source)``. Returns ``(0, {})`` if the
+    collection has not been created yet — callers should treat that as
+    "nothing indexed" rather than an error.
+    """
+    client = _get_qdrant_client()
+    if not client.collection_exists(settings.qdrant_collection):
+        return 0, {}
+    total = 0
+    by_source: dict[str, int] = {}
+    offset: Any = None
+    # 256 is a balance between round-trip count and per-call payload size.
+    # For a moderately sized corpus this should land in a handful of calls.
+    while True:
+        batch, offset = client.scroll(
+            collection_name=settings.qdrant_collection,
+            limit=256,
+            with_payload=True,
+            offset=offset,
+        )
+        for point in batch:
+            total += 1
+            metadata = (point.payload or {}).get("metadata") or {}
+            source = metadata.get("source")
+            if not source:
+                continue
+            by_source[source] = by_source.get(source, 0) + 1
+        if offset is None:
+            break
+    return total, by_source
+
+
 class QueryRequest(BaseModel):
     question: str = Field(min_length=3)
     filters: dict[str, Any] | None = None
@@ -73,6 +113,39 @@ def health() -> dict[str, str]:
 @app.get("/metrics")
 def metrics() -> dict[str, Any]:
     return counters().snapshot()
+
+
+@app.get("/corpus/stats")
+def corpus_stats() -> dict[str, Any]:
+    """Summary counts for the indexed corpus."""
+    try:
+        total, by_source = _aggregate_sources()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+    return {
+        "collection": settings.qdrant_collection,
+        "chunks": total,
+        "sources": len(by_source),
+    }
+
+
+@app.get("/corpus/sources")
+def corpus_sources() -> dict[str, Any]:
+    """Per-source chunk counts, sorted with the heaviest contributors first."""
+    try:
+        _, by_source = _aggregate_sources()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+    rows = [
+        {"source": source, "chunks": count}
+        for source, count in by_source.items()
+    ]
+    rows.sort(key=lambda r: (-r["chunks"], r["source"]))
+    return {"sources": rows}
 
 
 @app.post("/query")
