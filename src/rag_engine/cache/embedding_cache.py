@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from langchain_core.embeddings import Embeddings
+
 from rag_engine.cache.store import CacheStore
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import get_logger
@@ -23,12 +25,13 @@ def _key(model: str, text: str) -> str:
     return digest
 
 
-class CachingEmbeddings:
+class CachingEmbeddings(Embeddings):
     """Drop-in proxy around any LangChain embeddings implementation.
 
-    Implements both ``embed_query`` and ``embed_documents`` so it can stand
-    in wherever a HuggingFaceEmbeddings instance was used. Misses fall
-    through to the wrapped object; hits skip inference entirely.
+    Inherits from ``langchain_core.embeddings.Embeddings`` so isinstance
+    checks (eg. ``langchain_qdrant`` >=1.11) recognise it as a valid
+    embeddings backend rather than rejecting it as a duck-typed proxy.
+    Misses fall through to the wrapped object; hits skip inference entirely.
     """
 
     def __init__(self, inner: Any, store: CacheStore, model_name: str) -> None:
