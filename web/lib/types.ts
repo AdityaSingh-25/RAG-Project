@@ -78,3 +78,18 @@ export interface IngestResponse {
   /** Only present on the multipart /ingest/upload endpoint. */
   files_received?: number;
 }
+
+export interface CorpusStats {
+  collection: string;
+  chunks: number;
+  sources: number;
+}
+
+export interface CorpusSource {
+  source: string;
+  chunks: number;
+}
+
+export interface CorpusSourcesResponse {
+  sources: CorpusSource[];
+}
