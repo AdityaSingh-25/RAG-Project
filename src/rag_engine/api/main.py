@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 
 from rag_engine.agents.graph import ANSWER_TOKEN_CHANNEL, build_graph
 from rag_engine.cache import answer_cache
@@ -146,6 +147,72 @@ def corpus_sources() -> dict[str, Any]:
     ]
     rows.sort(key=lambda r: (-r["chunks"], r["source"]))
     return {"sources": rows}
+
+
+# Bound the inspector response so a single huge source can't blow the
+# browser. Anything beyond this is reported as `truncated: true` with a
+# `total` count so the UI can warn — actual paging is left for a future
+# phase if it ever becomes useful.
+_CORPUS_SOURCE_MAX_CHUNKS = 500
+
+
+@app.get("/corpus/source")
+def corpus_source(
+    path: str = Query(..., description="Exact metadata.source value to inspect"),
+) -> dict[str, Any]:
+    """Every chunk indexed from a given source, in chunk_id order."""
+    client = _get_qdrant_client()
+    try:
+        if not client.collection_exists(settings.qdrant_collection):
+            return {"source": path, "chunks": [], "total": 0, "truncated": False}
+        flt = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key="metadata.source",
+                    match=qdrant_models.MatchValue(value=path),
+                )
+            ]
+        )
+        chunks: list[dict[str, Any]] = []
+        offset: Any = None
+        truncated = False
+        while True:
+            batch, offset = client.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=flt,
+                limit=256,
+                with_payload=True,
+                offset=offset,
+            )
+            for point in batch:
+                payload = point.payload or {}
+                metadata = payload.get("metadata") or {}
+                chunks.append(
+                    {
+                        "chunk_id": metadata.get("chunk_id"),
+                        "content_hash": metadata.get("content_hash"),
+                        "page": metadata.get("page"),
+                        "content": payload.get("page_content") or "",
+                    }
+                )
+                if len(chunks) >= _CORPUS_SOURCE_MAX_CHUNKS:
+                    truncated = True
+                    break
+            if truncated or offset is None:
+                break
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+    # Stable order so the UI lists chunks the way they were chunked. Missing
+    # chunk_id falls to the end (sorted last by tuple comparison).
+    chunks.sort(key=lambda c: (c["chunk_id"] is None, c["chunk_id"] or 0))
+    return {
+        "source": path,
+        "chunks": chunks,
+        "total": len(chunks),
+        "truncated": truncated,
+    }
 
 
 @app.post("/query")

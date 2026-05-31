@@ -91,3 +91,17 @@ export interface CorpusSource {
 export interface CorpusSourcesResponse {
   sources: CorpusSource[];
 }
+
+export interface CorpusChunk {
+  chunk_id: number | null;
+  content_hash: string | null;
+  page: number | null;
+  content: string;
+}
+
+export interface CorpusSourceDetail {
+  source: string;
+  chunks: CorpusChunk[];
+  total: number;
+  truncated: boolean;
+}

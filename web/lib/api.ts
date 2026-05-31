@@ -6,6 +6,7 @@ import { consumeSse } from "./sse";
 import type {
   Citation,
   ClaimGrounding,
+  CorpusSourceDetail,
   CorpusSourcesResponse,
   CorpusStats,
   IngestRequest,
@@ -56,6 +57,15 @@ export async function getCorpusSources(
 ): Promise<CorpusSourcesResponse> {
   const res = await fetch("/api/corpus/sources", { signal, cache: "no-store" });
   return jsonOrThrow<CorpusSourcesResponse>(res);
+}
+
+export async function getCorpusSource(
+  path: string,
+  signal?: AbortSignal,
+): Promise<CorpusSourceDetail> {
+  const url = `/api/corpus/source?path=${encodeURIComponent(path)}`;
+  const res = await fetch(url, { signal, cache: "no-store" });
+  return jsonOrThrow<CorpusSourceDetail>(res);
 }
 
 export interface GroundingEvent {

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { SourceInspector } from "@/components/SourceInspector";
 import { ApiError, getCorpusSources, getCorpusStats } from "@/lib/api";
 import type { CorpusSource, CorpusStats } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -22,6 +23,7 @@ export default function CorpusPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [inspecting, setInspecting] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -162,7 +164,20 @@ export default function CorpusPage() {
                 {filtered.map((row) => {
                   const share = totalChunks > 0 ? row.chunks / totalChunks : 0;
                   return (
-                    <tr key={row.source} className="border-b last:border-b-0">
+                    <tr
+                      key={row.source}
+                      onClick={() => setInspecting(row.source)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setInspecting(row.source);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Inspect chunks from ${row.source}`}
+                      className="hover:bg-sunken cursor-pointer border-b transition-colors last:border-b-0 focus:outline-none focus-visible:ring-[3px] focus-visible:ring-[color-mix(in_oklch,var(--color-accent),transparent_70%)]"
+                    >
                       <td className="break-all px-4 py-2.5 font-mono text-[12.5px]">
                         {row.source}
                       </td>
@@ -193,6 +208,8 @@ export default function CorpusPage() {
           updated · {lastUpdated.toLocaleTimeString()}
         </p>
       )}
+
+      <SourceInspector source={inspecting} onClose={() => setInspecting(null)} />
     </main>
   );
 }
