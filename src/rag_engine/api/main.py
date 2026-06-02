@@ -2,6 +2,7 @@ import json
 import logging
 import shutil
 import uuid
+from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,6 +20,13 @@ from rag_engine.agents.graph import ANSWER_TOKEN_CHANNEL, build_graph
 from rag_engine.cache import answer_cache
 from rag_engine.cache.store import CacheStore
 from rag_engine.config.settings import get_settings
+from rag_engine.evaluation.harness import (
+    EvalCase,
+    EvalResult,
+    citation_hit_rate,
+    load_cases,
+    term_recall,
+)
 from rag_engine.ingestion.pipeline import ingest_path
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import configure_logging, get_logger, log_event, now_ms
@@ -108,6 +116,13 @@ class IngestRequest(BaseModel):
     source_path: str = "data/raw"
 
 
+class EvalRunRequest(BaseModel):
+    dataset: Literal["seed", "adversarial"] = "seed"
+    # Capped per-call so a curious click on a slow stack doesn't hang the UI
+    # for 30+ minutes. ``None`` means "run everything".
+    limit: int | None = Field(default=5, ge=1, le=100)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.app_env}
@@ -116,6 +131,131 @@ def health() -> dict[str, str]:
 @app.get("/metrics")
 def metrics() -> dict[str, Any]:
     return counters().snapshot()
+
+
+_EVAL_DATASETS: dict[str, Path] = {
+    "seed": Path("data/eval/seed_cases.jsonl"),
+    "adversarial": Path("data/eval/adversarial_cases.jsonl"),
+}
+
+
+def _aggregate_eval(results: list[EvalResult]) -> dict[str, float]:
+    """Mirrors `harness.evaluate_dataset`'s aggregate block. Kept local rather
+    than reused because the harness ships a sync runner and we drive the
+    graph async, but the math is identical."""
+    n = len(results)
+    if n == 0:
+        return {
+            "n": 0.0,
+            "mean_grounding": 0.0,
+            "mean_citation_hit_rate": 0.0,
+            "mean_term_recall": 0.0,
+            "mean_latency_ms": 0.0,
+            "mean_iteration": 0.0,
+            "insufficient_evidence_rate": 0.0,
+            "mean_grounded_claim_rate": 0.0,
+            "status_match_rate": 0.0,
+        }
+    insufficient = sum(1 for r in results if r.status == "insufficient_evidence")
+    status_matches = sum(1 for r in results if r.status_matches_expected)
+    return {
+        "n": float(n),
+        "mean_grounding": round(sum(r.grounding_score for r in results) / n, 3),
+        "mean_citation_hit_rate": round(
+            sum(r.citation_hit_rate for r in results) / n, 3
+        ),
+        "mean_term_recall": round(sum(r.term_recall for r in results) / n, 3),
+        "mean_latency_ms": round(sum(r.latency_ms for r in results) / n, 2),
+        "mean_iteration": round(sum(r.iteration for r in results) / n, 2),
+        "insufficient_evidence_rate": round(insufficient / n, 3),
+        "mean_grounded_claim_rate": round(
+            sum(r.grounded_claim_rate for r in results) / n, 3
+        ),
+        "status_match_rate": round(status_matches / n, 3),
+    }
+
+
+async def _run_one_case(case: EvalCase, graph: Any) -> EvalResult:
+    started = now_ms()
+    state = await graph.ainvoke(
+        {
+            "question": case.question,
+            "original_question": case.question,
+            "filters": {},
+            "documents": [],
+            "answer": "",
+            "citations": [],
+            "grounding_score": 0.0,
+            "warnings": [],
+            "iteration": 0,
+            "status": "",
+            "trace_id": uuid.uuid4().hex,
+            "grounded_claim_rate": 1.0,
+            "claim_grounding": [],
+            "pipeline_trace": [],
+            "override_claim_verifier_mode": None,
+            "override_structured_answers": None,
+        }
+    )
+    latency_ms = now_ms() - started
+    answer = str(state.get("answer", ""))
+    citations = list(state.get("citations", []))
+    status = str(state.get("status") or "ok")
+    return EvalResult(
+        case_id=case.id,
+        question=case.question,
+        answer=answer,
+        grounding_score=float(state.get("grounding_score", 0.0)),
+        citation_hit_rate=citation_hit_rate(citations, case.must_cite),
+        term_recall=term_recall(answer, case.expected_terms),
+        iteration=int(state.get("iteration", 0)),
+        warnings=list(state.get("warnings", [])),
+        latency_ms=round(latency_ms, 2),
+        grounded_claim_rate=float(state.get("grounded_claim_rate", 1.0)),
+        status=status,
+        expected_status=case.expected_status,
+        status_matches_expected=(status == case.expected_status),
+        citations=citations,
+    )
+
+
+@app.post("/eval/run")
+async def eval_run(request: EvalRunRequest) -> dict[str, Any]:
+    """Run the eval harness against the live graph and return the report.
+
+    Synchronous from the caller's perspective: the full dataset (capped by
+    `limit`) is executed in-process before the response is returned. For
+    long runs the caller is responsible for keeping the connection open.
+    """
+    cases_path = _EVAL_DATASETS.get(request.dataset)
+    if cases_path is None or not cases_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Eval dataset not found: {request.dataset}"
+        )
+    try:
+        graph = _get_graph()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+
+    cases = load_cases(cases_path)
+    if request.limit is not None:
+        cases = cases[: request.limit]
+
+    results: list[EvalResult] = []
+    for case in cases:
+        results.append(await _run_one_case(case, graph))
+
+    counters().increment("api.eval.runs.total")
+    counters().increment(f"api.eval.runs.dataset.{request.dataset}")
+    return {
+        "dataset": request.dataset,
+        "limit": request.limit,
+        "total_cases_available": len(load_cases(cases_path)),
+        "aggregate": _aggregate_eval(results),
+        "results": [asdict(r) for r in results],
+    }
 
 
 @app.get("/corpus/stats")

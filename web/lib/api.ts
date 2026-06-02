@@ -9,6 +9,8 @@ import type {
   CorpusSourceDetail,
   CorpusSourcesResponse,
   CorpusStats,
+  EvalReport,
+  EvalRequest,
   IngestRequest,
   IngestResponse,
   MetricsSnapshot,
@@ -66,6 +68,21 @@ export async function getCorpusSource(
   const url = `/api/corpus/source?path=${encodeURIComponent(path)}`;
   const res = await fetch(url, { signal, cache: "no-store" });
   return jsonOrThrow<CorpusSourceDetail>(res);
+}
+
+/** Run the eval harness against the live graph. Long-running — callers
+ *  should pass an AbortSignal and show progress UI. */
+export async function runEval(
+  req: EvalRequest,
+  signal?: AbortSignal,
+): Promise<EvalReport> {
+  const res = await fetch("/api/eval/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  return jsonOrThrow<EvalReport>(res);
 }
 
 export interface GroundingEvent {
