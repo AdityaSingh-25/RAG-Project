@@ -258,6 +258,66 @@ async def eval_run(request: EvalRunRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/eval/stream")
+async def eval_stream(request: EvalRunRequest) -> StreamingResponse:
+    """SSE variant of /eval/run.
+
+    Emits these event types:
+      - ``started`` : dataset metadata + how many cases will run
+      - ``case``    : one EvalResult per completed case, with `index`
+      - ``error``   : per-case exceptions; the loop keeps going to the next
+      - ``aggregate``: final aggregate computed across the cases that succeeded
+    """
+    cases_path = _EVAL_DATASETS.get(request.dataset)
+    if cases_path is None or not cases_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Eval dataset not found: {request.dataset}"
+        )
+    try:
+        graph = _get_graph()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+
+    all_cases = load_cases(cases_path)
+    cases = all_cases if request.limit is None else all_cases[: request.limit]
+
+    async def gen():
+        yield _sse(
+            "started",
+            {
+                "dataset": request.dataset,
+                "limit": request.limit,
+                "total": len(cases),
+                "total_cases_available": len(all_cases),
+            },
+        )
+        results: list[EvalResult] = []
+        for index, case in enumerate(cases):
+            try:
+                result = await _run_one_case(case, graph)
+            except Exception as exc:
+                # Surface the failure but keep going — one bad case shouldn't
+                # tank the whole run. The aggregate will reflect only the
+                # cases that successfully produced a result.
+                yield _sse(
+                    "error",
+                    {"index": index, "case_id": case.id, "detail": str(exc)},
+                )
+                continue
+            results.append(result)
+            yield _sse("case", {"index": index, "result": asdict(result)})
+        yield _sse(
+            "aggregate",
+            {"aggregate": _aggregate_eval(results), "completed": len(results)},
+        )
+
+    counters().increment("api.eval.streams.total")
+    counters().increment(f"api.eval.streams.dataset.{request.dataset}")
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @app.get("/corpus/stats")
 def corpus_stats() -> dict[str, Any]:
     """Summary counts for the indexed corpus."""
