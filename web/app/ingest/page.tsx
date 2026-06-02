@@ -36,6 +36,8 @@ interface HistoryEntry {
   source: string;
   indexed: number;
   duplicates: number;
+  /** Cross-run duplicates (content_hash already in Qdrant from a prior run). */
+  crossRunDuplicates: number;
   filesReceived?: number;
   at: Date;
 }
@@ -119,6 +121,7 @@ export default function IngestPage() {
           source: trimmed,
           indexed: res.ingested_chunks,
           duplicates: res.duplicates_removed,
+          crossRunDuplicates: res.cross_run_duplicates_removed ?? 0,
           at: new Date(),
         });
       } else {
@@ -128,6 +131,7 @@ export default function IngestPage() {
           source: summariseUpload(files),
           indexed: res.ingested_chunks,
           duplicates: res.duplicates_removed,
+          crossRunDuplicates: res.cross_run_duplicates_removed ?? 0,
           filesReceived: res.files_received ?? files.length,
           at: new Date(),
         });
@@ -267,6 +271,11 @@ export default function IngestPage() {
                   {h.duplicates > 0 && (
                     <span style={{ color: "var(--color-warning)" }}>
                       −{h.duplicates} dupes
+                    </span>
+                  )}
+                  {h.crossRunDuplicates > 0 && (
+                    <span style={{ color: "var(--color-accent)" }}>
+                      −{h.crossRunDuplicates} prior
                     </span>
                   )}
                   <span>{h.at.toLocaleTimeString()}</span>
@@ -465,7 +474,7 @@ function ResultCard({ latest }: { latest: HistoryEntry }) {
         <CheckCircle2 size={15} strokeWidth={2.25} />
         Ingest complete
       </div>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+      <div className="mt-4 grid gap-4 sm:grid-cols-3">
         <Metric
           icon={<Copy size={14} />}
           label="Chunks indexed"
@@ -474,10 +483,20 @@ function ResultCard({ latest }: { latest: HistoryEntry }) {
         />
         <Metric
           icon={<Hash size={14} />}
-          label="Duplicates removed"
+          label="In-batch duplicates"
           value={latest.duplicates.toString()}
           accent={
             latest.duplicates > 0 ? "var(--color-warning)" : "var(--color-fg-muted)"
+          }
+        />
+        <Metric
+          icon={<Hash size={14} />}
+          label="Already indexed"
+          value={latest.crossRunDuplicates.toString()}
+          accent={
+            latest.crossRunDuplicates > 0
+              ? "var(--color-accent)"
+              : "var(--color-fg-muted)"
           }
         />
       </div>

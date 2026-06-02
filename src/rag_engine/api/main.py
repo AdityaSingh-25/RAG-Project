@@ -440,6 +440,7 @@ def ingest(request: IngestRequest) -> dict[str, Any]:
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
+        "cross_run_duplicates_removed": report.cross_run_duplicates_removed,
     }
 
 
@@ -498,6 +499,7 @@ async def ingest_upload(files: list[UploadFile] = File(...)) -> dict[str, Any]:
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
+        "cross_run_duplicates_removed": report.cross_run_duplicates_removed,
         "files_received": len(files),
     }
 
