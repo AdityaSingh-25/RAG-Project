@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Database, Library, Sparkles } from "lucide-react";
+import { BarChart3, ClipboardList, Database, Library, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { href: "/", label: "Ask", Icon: Sparkles },
   { href: "/corpus", label: "Corpus", Icon: Library },
+  { href: "/eval", label: "Eval", Icon: ClipboardList },
   { href: "/metrics", label: "Metrics", Icon: BarChart3 },
   { href: "/ingest", label: "Ingest", Icon: Database },
 ] as const;
