@@ -74,7 +74,10 @@ export interface IngestRequest {
 
 export interface IngestResponse {
   ingested_chunks: number;
+  /** In-batch duplicates: same content_hash appeared twice in this run. */
   duplicates_removed: number;
+  /** Cross-run duplicates: content_hash already lived in Qdrant before. */
+  cross_run_duplicates_removed?: number;
   /** Only present on the multipart /ingest/upload endpoint. */
   files_received?: number;
 }
