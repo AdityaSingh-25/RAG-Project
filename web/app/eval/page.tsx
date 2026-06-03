@@ -12,12 +12,11 @@ import {
 } from "lucide-react";
 import { FormEvent, useRef, useState } from "react";
 
-import { ApiError, runEval } from "@/lib/api";
+import { ApiError, runEvalStream } from "@/lib/api";
 import type {
   EvalAggregate,
   EvalCaseResult,
   EvalDataset,
-  EvalReport,
 } from "@/lib/types";
 import { cn, formatMs } from "@/lib/utils";
 
@@ -34,10 +33,24 @@ const DATASETS: Array<{ value: EvalDataset; label: string; hint: string }> = [
   },
 ];
 
+interface StreamHeader {
+  total: number;
+  totalCasesAvailable: number;
+}
+
+interface CaseError {
+  index: number;
+  caseId: string;
+  detail: string;
+}
+
 export default function EvalPage() {
   const [dataset, setDataset] = useState<EvalDataset>("seed");
   const [limit, setLimit] = useState(5);
-  const [report, setReport] = useState<EvalReport | null>(null);
+  const [header, setHeader] = useState<StreamHeader | null>(null);
+  const [results, setResults] = useState<EvalCaseResult[]>([]);
+  const [aggregate, setAggregate] = useState<EvalAggregate | null>(null);
+  const [caseErrors, setCaseErrors] = useState<CaseError[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -50,10 +63,26 @@ export default function EvalPage() {
     abortRef.current = controller;
     setRunning(true);
     setError(null);
-    setReport(null);
+    setHeader(null);
+    setResults([]);
+    setAggregate(null);
+    setCaseErrors([]);
     try {
-      const next = await runEval({ dataset, limit }, controller.signal);
-      setReport(next);
+      await runEvalStream(
+        { dataset, limit },
+        {
+          onStarted: (e) =>
+            setHeader({ total: e.total, totalCasesAvailable: e.total_cases_available }),
+          onCase: (e) => setResults((prev) => [...prev, e.result]),
+          onCaseError: (e) =>
+            setCaseErrors((prev) => [
+              ...prev,
+              { index: e.index, caseId: e.case_id, detail: e.detail },
+            ]),
+          onAggregate: (e) => setAggregate(e.aggregate),
+        },
+        controller.signal,
+      );
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof ApiError ? err.message : String(err));
@@ -130,19 +159,80 @@ export default function EvalPage() {
         </div>
       )}
 
-      {running && !report && <RunningPlaceholder limit={limit} />}
+      {caseErrors.length > 0 && (
+        <div
+          className="mb-6 rounded-lg border px-4 py-3 text-sm"
+          style={{
+            borderColor: "color-mix(in oklch, var(--color-warning), transparent 70%)",
+            background: "color-mix(in oklch, var(--color-warning), transparent 92%)",
+          }}
+        >
+          <div className="font-medium" style={{ color: "var(--color-warning)" }}>
+            {caseErrors.length} case{caseErrors.length === 1 ? "" : "s"} failed during the run
+          </div>
+          <ul className="mt-2 space-y-1 font-mono text-[11.5px]">
+            {caseErrors.map((e) => (
+              <li key={e.index} className="text-muted break-words">
+                <span className="font-semibold">{e.caseId}</span> · {e.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-      {report && (
+      {running && header === null && results.length === 0 && (
+        <RunningPlaceholder limit={limit} stage="starting" />
+      )}
+
+      {header !== null && running && results.length === 0 && (
+        <RunningPlaceholder
+          limit={header.total}
+          stage="running"
+          currentIndex={0}
+        />
+      )}
+
+      {aggregate !== null && (
+        <AggregateCard aggregate={aggregate} dataset={dataset} />
+      )}
+
+      {results.length > 0 && (
         <>
-          <AggregateCard aggregate={report.aggregate} dataset={report.dataset} />
+          {running && aggregate === null && header !== null && (
+            <ProgressBar current={results.length + caseErrors.length} total={header.total} />
+          )}
           <ResultsTable
-            results={report.results}
-            limit={report.limit}
-            totalAvailable={report.total_cases_available}
+            results={results}
+            limit={limit}
+            totalAvailable={header?.totalCasesAvailable ?? results.length}
           />
         </>
       )}
     </main>
+  );
+}
+
+function ProgressBar({ current, total }: { current: number; total: number }) {
+  const pct = total > 0 ? Math.min(100, (current / total) * 100) : 0;
+  return (
+    <div className="bg-elev mb-4 rounded-md border p-3">
+      <div className="text-muted mb-1.5 flex items-center justify-between gap-3 text-[12px]">
+        <span>
+          Case {current} of {total}
+        </span>
+        <Loader2 size={12} className="animate-spin" />
+      </div>
+      <div className="bg-sunken h-1.5 overflow-hidden rounded-full">
+        <div
+          className="h-full"
+          style={{
+            width: `${pct}%`,
+            background: "var(--color-accent)",
+            transition: "width 220ms ease",
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -211,11 +301,23 @@ function LimitInput({
   );
 }
 
-function RunningPlaceholder({ limit }: { limit: number }) {
+function RunningPlaceholder({
+  limit,
+  stage,
+  currentIndex,
+}: {
+  limit: number;
+  stage: "starting" | "running";
+  currentIndex?: number;
+}) {
   return (
     <div className="bg-elev rounded-lg border px-6 py-10 text-center">
       <Loader2 className="text-accent mx-auto animate-spin" size={28} />
-      <p className="mt-3 font-medium">Running up to {limit} cases…</p>
+      <p className="mt-3 font-medium">
+        {stage === "starting"
+          ? `Loading dataset…`
+          : `Running case ${(currentIndex ?? 0) + 1} of ${limit}…`}
+      </p>
       <p className="text-muted mt-1 text-sm">
         Each case re-runs the full pipeline (retrieve → answer → critique).
       </p>

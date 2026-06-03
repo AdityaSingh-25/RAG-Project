@@ -9,6 +9,8 @@ import type {
   CorpusSourceDetail,
   CorpusSourcesResponse,
   CorpusStats,
+  EvalAggregate,
+  EvalCaseResult,
   EvalReport,
   EvalRequest,
   IngestRequest,
@@ -83,6 +85,66 @@ export async function runEval(
     signal,
   });
   return jsonOrThrow<EvalReport>(res);
+}
+
+export interface EvalStreamStartedEvent {
+  dataset: EvalRequest["dataset"];
+  limit: number | null;
+  total: number;
+  total_cases_available: number;
+}
+
+export interface EvalStreamCaseEvent {
+  index: number;
+  result: EvalCaseResult;
+}
+
+export interface EvalStreamAggregateEvent {
+  aggregate: EvalAggregate;
+  completed: number;
+}
+
+export interface EvalStreamErrorEvent {
+  index: number;
+  case_id: string;
+  detail: string;
+}
+
+export interface EvalStreamHandlers {
+  onStarted?: (e: EvalStreamStartedEvent) => void;
+  onCase?: (e: EvalStreamCaseEvent) => void;
+  onAggregate?: (e: EvalStreamAggregateEvent) => void;
+  onCaseError?: (e: EvalStreamErrorEvent) => void;
+}
+
+/** SSE variant. Emits per-case results as they finish so the UI can fill
+ *  rows progressively rather than blocking on the whole dataset. */
+export async function runEvalStream(
+  req: EvalRequest,
+  handlers: EvalStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/eval/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new ApiError(detail || `Eval stream failed (${res.status})`, res.status);
+  }
+  await consumeSse(
+    res,
+    {
+      started: (d) => handlers.onStarted?.(d as EvalStreamStartedEvent),
+      case: (d) => handlers.onCase?.(d as EvalStreamCaseEvent),
+      aggregate: (d) => handlers.onAggregate?.(d as EvalStreamAggregateEvent),
+      error: (d) => handlers.onCaseError?.(d as EvalStreamErrorEvent),
+    },
+    signal,
+  );
 }
 
 export interface GroundingEvent {
