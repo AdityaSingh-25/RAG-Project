@@ -1,24 +1,24 @@
 # RAG Multi-Agent Intelligence Engine
 
-A production-shaped Retrieval Augmented Generation project using LangChain, LangGraph, Qdrant, and local/open-source model providers. This scaffold intentionally excludes Claude and OpenAI dependencies.
+A production-shaped Retrieval Augmented Generation project using LangChain, LangGraph, Qdrant and local/open-source model providers. This scaffold intentionally excludes Claude and OpenAI dependencies.
 
 ## What This Builds
 
-- Document ingestion for PDFs, Markdown, text, CSV, JSON, and web-ready sources.
+- Document ingestion for PDFs, Markdown, text, CSV, JSON and web-ready sources.
 - Semantic chunking with metadata preservation.
 - Embeddings stored in Qdrant for semantic retrieval.
-- LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry, and an explicit "insufficient evidence" exit.
+- LangGraph multi-agent workflow with retrieval, answer synthesis, a self-checking critic, feedback-loop retry and an explicit "insufficient evidence" exit.
 - Hybrid retrieval (BM25 + dense) fused with Reciprocal Rank Fusion.
 - Two-stage retrieval with a neural cross-encoder reranker as the second stage.
 - Source confidence scoring (freshness + glob-keyed trust weights + dense/BM25 agreement) multiplied into the reranker score so trusted sources rise in ranking.
 - Content-hash deduplication at ingest, so the same chunk appearing in multiple files isn't indexed or BM25-corpused twice.
-- Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites, and the run is rejected when too many sentences are unsupported.
-- SQLite-backed caching for embeddings, cross-encoder scoring, and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
+- Per-claim citation grounding: every sentence in an answer is verified against the chunks it cites and the run is rejected when too many sentences are unsupported.
+- SQLite-backed caching for embeddings, cross-encoder scoring and final answers; JSON-structured logging with per-query trace IDs and a `/metrics` endpoint.
 - CI eval gate covering a happy-path dataset and an adversarial dataset, with a fixture-replay mode so real engine behavior can be checked offline.
 - Model routing and token budgeting across local models served by Ollama.
-- FastAPI service for ingestion, querying, health checks, and evaluation hooks.
+- FastAPI service for ingestion, querying, health checks and evaluation hooks.
 - Docker Compose for local infrastructure and CI-ready Docker build.
-- Optional LangSmith tracing for latency, token, and workflow inspection.
+- Optional LangSmith tracing for latency, token and workflow inspection.
 
 ## Stack
 
@@ -75,7 +75,7 @@ docker compose up -d
 ```
 
 The API container starts immediately; the Qdrant collection is created
-on first ingest, and the LLM connection is established lazily on the
+on first ingest and the LLM connection is established lazily on the
 first `/query` call.
 
 3. Pull local models into the Ollama container:
@@ -106,9 +106,9 @@ The response includes an `iteration` field showing how many feedback-loop
 retries the critic triggered (0 when the first answer met the grounding
 threshold) and a `status` field that is `"ok"` when the critic was
 satisfied or `"insufficient_evidence"` when the retry budget was exhausted
-without clearing the grounding threshold — in that case `answer` is a
+without clearing the grounding threshold - in that case `answer` is a
 structured refusal rather than a fabricated response. The response also
-carries `grounded_claim_rate` and a `claim_grounding` array — one entry per
+carries `grounded_claim_rate` and a `claim_grounding` array, one entry per
 sentence in the answer with its parsed citations and per-claim support
 score, so downstream UIs can highlight unsupported claims.
 
@@ -123,7 +123,7 @@ npm run dev
 
 Open `http://localhost:3000`. The dashboard proxies `/api/query` and
 `/api/metrics` to FastAPI through `RAG_API_URL`, then shows the answer,
-citations, per-claim grounding, pipeline trace, and runtime counters.
+citations, per-claim grounding, pipeline trace and runtime counters.
 
 7. Evaluate the engine against a JSONL of cases:
 
@@ -194,7 +194,7 @@ The default setup uses local providers:
 - `EVAL_BASELINE_GROUNDING=0.0` (CI eval gate floor for `seed.mean_grounding`; raise to gate on regressions)
 - `EVAL_BASELINE_STATUS_MATCH_RATE=0.0` (CI eval gate floor for `status_match_rate` on both datasets; catches adversarial cases that stop being refused)
 - `CACHE_ENABLED=true` (set to `false` to bypass all caches)
-- `CACHE_PATH=data/processed/cache.sqlite` (single SQLite file holding embedding, reranker, and answer namespaces)
+- `CACHE_PATH=data/processed/cache.sqlite` (single SQLite file holding embedding, reranker and answer namespaces)
 - `CACHE_TTL_SECONDS=86400` (default expiry; embeddings can be much longer in practice, answer cache benefits from shorter)
 - `ANSWER_CACHE_ENABLED=true` (orthogonal toggle for the question-keyed answer cache; pass `bypass_cache=true` on a `/query` to fetch fresh)
 - `LOG_FORMAT=json` (set to `text` for human-readable lines instead)
