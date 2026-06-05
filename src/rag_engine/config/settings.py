@@ -89,6 +89,18 @@ class Settings(BaseSettings):
     langchain_project: str = "rag-multi-agent-engine"
     langchain_api_key: str | None = None
 
+    # API key auth. Comma-separated plaintext keys; SHA-256 hashed in
+    # memory at startup. Empty string disables auth entirely (dev mode).
+    # Plaintext-in-env is fine for local dev and most hosted setups; for
+    # high-stakes deployments rotate by changing the env var and
+    # restarting.
+    api_keys_csv: str = ""
+    # Per-identity token bucket. ``rate_limit_burst`` is the bucket
+    # ceiling (max instantaneous spend); ``rate_limit_per_minute`` is
+    # the steady-state refill rate.
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=10_000)
+    rate_limit_burst: int = Field(default=20, ge=1, le=10_000)
+
 
 @lru_cache
 def get_settings() -> Settings:
