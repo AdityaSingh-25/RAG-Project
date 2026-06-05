@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import shutil
@@ -28,6 +29,10 @@ from rag_engine.evaluation.harness import (
     term_recall,
 )
 from rag_engine.ingestion.pipeline import ingest_path
+from rag_engine.observability.backpressure import (
+    BackpressureError,
+    ConcurrencyLimiter,
+)
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import configure_logging, get_logger, log_event, now_ms
 from rag_engine.observability.tracing import configure_tracing
@@ -65,6 +70,46 @@ def _get_answer_store() -> CacheStore | None:
 @lru_cache(maxsize=1)
 def _get_qdrant_client() -> QdrantClient:
     return QdrantClient(url=settings.qdrant_url)
+
+
+@lru_cache(maxsize=1)
+def _query_limiter() -> ConcurrencyLimiter:
+    return ConcurrencyLimiter("query", settings.max_concurrent_queries)
+
+
+@lru_cache(maxsize=1)
+def _ingest_limiter() -> ConcurrencyLimiter:
+    return ConcurrencyLimiter("ingest", settings.max_concurrent_ingest)
+
+
+def _backpressure_response(
+    exc: BackpressureError, trace_id: str | None = None
+) -> HTTPException:
+    """Translate a limiter rejection into a 429 with a Retry-After header.
+
+    The header value is a hint, not a contract — clients that respect it
+    will back off; clients that don't will just see another 429."""
+    counters().increment(f"api.backpressure.rejected.{exc.name}")
+    log_event(
+        _logger,
+        "api.backpressure.rejected",
+        trace_id=trace_id or uuid.uuid4().hex,
+        kind=exc.name,
+        in_flight=exc.in_flight,
+        limit=exc.limit,
+        level=logging.WARNING,
+    )
+    return HTTPException(
+        status_code=429,
+        detail={
+            "error": "backpressure",
+            "kind": exc.name,
+            "in_flight": exc.in_flight,
+            "limit": exc.limit,
+            "message": str(exc),
+        },
+        headers={"Retry-After": str(settings.backpressure_retry_after_seconds)},
+    )
 
 
 def _aggregate_sources() -> tuple[int, dict[str, int]]:
@@ -128,9 +173,24 @@ def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.app_env}
 
 
+@app.get("/livez")
+def livez() -> dict[str, str]:
+    """Liveness probe: process is up and the event loop is responsive.
+
+    Intentionally does not touch Qdrant or Ollama — orchestrators poll
+    this every second or two and we don't want to amplify load. Use
+    /health for component-level readiness."""
+    return {"status": "ok"}
+
+
 @app.get("/metrics")
 def metrics() -> dict[str, Any]:
-    return counters().snapshot()
+    snap = counters().snapshot()
+    snap["backpressure"] = {
+        "query": _query_limiter().snapshot(),
+        "ingest": _ingest_limiter().snapshot(),
+    }
+    return snap
 
 
 _EVAL_DATASETS: dict[str, Path] = {
@@ -422,6 +482,9 @@ async def query(request: QueryRequest) -> dict[str, Any]:
     trace_id = uuid.uuid4().hex
     counters().increment("api.query.total")
     store = _get_answer_store()
+    # Cache hits are intentionally NOT counted against the limiter: they
+    # don't touch the graph, return in microseconds, and limiting them
+    # would mostly hurt the dashboard polling case.
     if store is not None and not request.bypass_cache:
         cached = answer_cache.get(store, request.question)
         if cached is not None:
@@ -433,6 +496,18 @@ async def query(request: QueryRequest) -> dict[str, Any]:
             )
             return {**cached, "trace_id": trace_id, "cached": True}
 
+    try:
+        async with _query_limiter().acquire():
+            return await _run_query(request, trace_id, store)
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
+
+
+async def _run_query(
+    request: QueryRequest,
+    trace_id: str,
+    store: CacheStore | None,
+) -> dict[str, Any]:
     started = now_ms()
     try:
         graph = _get_graph()
@@ -551,92 +626,113 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
         )
         raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
 
+    # Acquire the slot before returning so a rejection comes back as a
+    # real 429, not as an in-band SSE `error` event after the response
+    # has already started streaming. The matching release lives in the
+    # generator's `finally` so the slot is held for the whole stream
+    # lifetime — including client disconnects mid-stream.
+    limiter = _query_limiter()
+    try:
+        await limiter.acquire_slot()
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
+
     initial = _initial_state(request, trace_id)
 
     async def gen():
         started = now_ms()
         final_state: dict | None = None
         try:
-            async for mode, chunk in graph.astream(
-                initial, stream_mode=["custom", "updates", "values"]
-            ):
-                if mode == "custom":
-                    if isinstance(chunk, dict) and ANSWER_TOKEN_CHANNEL in chunk:
-                        yield _sse("token", {"delta": chunk[ANSWER_TOKEN_CHANNEL]})
-                elif mode == "updates":
-                    for _node, diff in (chunk or {}).items():
-                        trace = (diff or {}).get("pipeline_trace") or []
-                        if trace:
-                            yield _sse("trace", trace[-1])
-                elif mode == "values":
-                    final_state = chunk
-        except Exception as exc:
-            log_event(
-                _logger,
-                "api.query.stream_error",
-                trace_id=trace_id,
-                error=str(exc),
-                level=logging.ERROR,
+            try:
+                async for mode, chunk in graph.astream(
+                    initial, stream_mode=["custom", "updates", "values"]
+                ):
+                    if mode == "custom":
+                        if isinstance(chunk, dict) and ANSWER_TOKEN_CHANNEL in chunk:
+                            yield _sse("token", {"delta": chunk[ANSWER_TOKEN_CHANNEL]})
+                    elif mode == "updates":
+                        for _node, diff in (chunk or {}).items():
+                            trace = (diff or {}).get("pipeline_trace") or []
+                            if trace:
+                                yield _sse("trace", trace[-1])
+                    elif mode == "values":
+                        final_state = chunk
+            except Exception as exc:
+                log_event(
+                    _logger,
+                    "api.query.stream_error",
+                    trace_id=trace_id,
+                    error=str(exc),
+                    level=logging.ERROR,
+                )
+                yield _sse("error", {"detail": str(exc)})
+                return
+
+            if final_state is None:
+                yield _sse("error", {"detail": "graph produced no final state"})
+                return
+
+            duration = now_ms() - started
+            counters().observe("api.query.latency_ms", duration)
+            status = final_state.get("status") or "ok"
+            counters().increment(f"api.query.status.{status}")
+
+            yield _sse("citations", {"citations": final_state.get("citations", [])})
+            yield _sse(
+                "grounding",
+                {
+                    "grounding_score": final_state.get("grounding_score", 0.0),
+                    "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
+                    "claim_grounding": final_state.get("claim_grounding", []),
+                    "warnings": final_state.get("warnings", []),
+                },
             )
-            yield _sse("error", {"detail": str(exc)})
-            return
 
-        if final_state is None:
-            yield _sse("error", {"detail": "graph produced no final state"})
-            return
-
-        duration = now_ms() - started
-        counters().observe("api.query.latency_ms", duration)
-        status = final_state.get("status") or "ok"
-        counters().increment(f"api.query.status.{status}")
-
-        yield _sse("citations", {"citations": final_state.get("citations", [])})
-        yield _sse(
-            "grounding",
-            {
+            payload = {
+                "answer": final_state.get("answer", ""),
+                "citations": final_state.get("citations", []),
                 "grounding_score": final_state.get("grounding_score", 0.0),
+                "warnings": final_state.get("warnings", []),
+                "iteration": final_state.get("iteration", 0),
+                "status": status,
                 "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
                 "claim_grounding": final_state.get("claim_grounding", []),
-                "warnings": final_state.get("warnings", []),
-            },
-        )
+                "pipeline_trace": final_state.get("pipeline_trace", []),
+                "total_duration_ms": round(duration, 2),
+            }
+            if store is not None and status == "ok":
+                answer_cache.put(store, request.question, payload)
 
-        payload = {
-            "answer": final_state.get("answer", ""),
-            "citations": final_state.get("citations", []),
-            "grounding_score": final_state.get("grounding_score", 0.0),
-            "warnings": final_state.get("warnings", []),
-            "iteration": final_state.get("iteration", 0),
-            "status": status,
-            "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
-            "claim_grounding": final_state.get("claim_grounding", []),
-            "pipeline_trace": final_state.get("pipeline_trace", []),
-            "total_duration_ms": round(duration, 2),
-        }
-        if store is not None and status == "ok":
-            answer_cache.put(store, request.question, payload)
-
-        log_event(
-            _logger,
-            "api.query.complete",
-            trace_id=trace_id,
-            duration_ms=round(duration, 2),
-            status=status,
-            iteration=final_state.get("iteration", 0),
-            grounding_score=final_state.get("grounding_score", 0.0),
-            streaming=True,
-        )
-        yield _sse("done", {**payload, "trace_id": trace_id, "cached": False})
+            log_event(
+                _logger,
+                "api.query.complete",
+                trace_id=trace_id,
+                duration_ms=round(duration, 2),
+                status=status,
+                iteration=final_state.get("iteration", 0),
+                grounding_score=final_state.get("grounding_score", 0.0),
+                streaming=True,
+            )
+            yield _sse("done", {**payload, "trace_id": trace_id, "cached": False})
+        finally:
+            await limiter.release_slot()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/ingest")
-def ingest(request: IngestRequest) -> dict[str, Any]:
+async def ingest(request: IngestRequest) -> dict[str, Any]:
     source = Path(request.source_path)
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path does not exist: {source}")
-    report = ingest_path(source, settings)
+    try:
+        async with _ingest_limiter().acquire():
+            # ``ingest_path`` is synchronous and IO-heavy; pushing it to a
+            # worker thread keeps the event loop free to keep serving
+            # /query and /livez while ingest runs.
+            report = await asyncio.to_thread(ingest_path, source, settings)
+    except BackpressureError as exc:
+        raise _backpressure_response(exc) from exc
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
@@ -670,29 +766,33 @@ async def ingest_upload(files: list[UploadFile] = File(...)) -> dict[str, Any]:
                 ),
             )
 
-    with TemporaryDirectory(prefix="rag-upload-") as tmp:
-        tmp_path = Path(tmp)
-        for upload in files:
-            # Strip any path components from the client — only keep the basename
-            # so a malicious filename like "../etc/passwd" can't escape the
-            # temp dir. `Path(...).name` returns only the final component.
-            safe_name = Path(upload.filename or "upload").name
-            target = tmp_path / safe_name
-            with target.open("wb") as out:
-                shutil.copyfileobj(upload.file, out)
-            await upload.close()
-        try:
-            report = ingest_path(tmp_path, settings)
-        except Exception as exc:
-            log_event(
-                _logger,
-                "api.ingest.upload.failed",
-                trace_id=trace_id,
-                error=str(exc),
-                file_count=len(files),
-                level=logging.ERROR,
-            )
-            raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
+    try:
+        async with _ingest_limiter().acquire():
+            with TemporaryDirectory(prefix="rag-upload-") as tmp:
+                tmp_path = Path(tmp)
+                for upload in files:
+                    # Strip any path components from the client — only keep the basename
+                    # so a malicious filename like "../etc/passwd" can't escape the
+                    # temp dir. `Path(...).name` returns only the final component.
+                    safe_name = Path(upload.filename or "upload").name
+                    target = tmp_path / safe_name
+                    with target.open("wb") as out:
+                        shutil.copyfileobj(upload.file, out)
+                    await upload.close()
+                try:
+                    report = await asyncio.to_thread(ingest_path, tmp_path, settings)
+                except Exception as exc:
+                    log_event(
+                        _logger,
+                        "api.ingest.upload.failed",
+                        trace_id=trace_id,
+                        error=str(exc),
+                        file_count=len(files),
+                        level=logging.ERROR,
+                    )
+                    raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
 
     counters().increment("api.ingest.upload.total")
     counters().increment("api.ingest.upload.files", amount=len(files))
