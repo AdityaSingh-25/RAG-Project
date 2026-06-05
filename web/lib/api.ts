@@ -4,6 +4,7 @@
 
 import { consumeSse } from "./sse";
 import type {
+  BackpressureDetail,
   Citation,
   ClaimGrounding,
   CorpusSourceDetail,
@@ -22,16 +23,51 @@ import type {
 } from "./types";
 
 export class ApiError extends Error {
+  /** Parsed backpressure detail when the server pushed back with a 429.
+   *  `undefined` for any other error. */
+  backpressure?: BackpressureDetail;
+  /** Seconds the server suggested waiting before retrying. */
+  retryAfterSeconds?: number;
   constructor(message: string, public status: number) {
     super(message);
     this.name = "ApiError";
   }
 }
 
+/** Try to pluck a structured backpressure detail out of a 429 body. The body
+ *  shape is `{"detail": {error: "backpressure", kind, in_flight, limit, message}}`
+ *  — anything else falls through to a plain ApiError. */
+function tryParseBackpressure(body: string): BackpressureDetail | undefined {
+  try {
+    const parsed = JSON.parse(body);
+    const detail = parsed?.detail;
+    if (
+      detail &&
+      typeof detail === "object" &&
+      detail.error === "backpressure" &&
+      (detail.kind === "query" || detail.kind === "ingest")
+    ) {
+      return detail as BackpressureDetail;
+    }
+  } catch {
+    // Not JSON — server returned a plain string body.
+  }
+  return undefined;
+}
+
 async function jsonOrThrow<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const detail = await res.text();
-    throw new ApiError(detail || res.statusText, res.status);
+    const error = new ApiError(detail || res.statusText, res.status);
+    if (res.status === 429) {
+      error.backpressure = tryParseBackpressure(detail);
+      const ra = res.headers.get("retry-after");
+      if (ra) error.retryAfterSeconds = Number(ra) || undefined;
+      if (error.backpressure) {
+        error.message = error.backpressure.message;
+      }
+    }
+    throw error;
   }
   return res.json();
 }
@@ -177,7 +213,17 @@ export async function runQueryStream(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => res.statusText);
-    throw new ApiError(detail || `Stream failed (${res.status})`, res.status);
+    const error = new ApiError(
+      detail || `Stream failed (${res.status})`,
+      res.status,
+    );
+    if (res.status === 429) {
+      error.backpressure = tryParseBackpressure(detail);
+      const ra = res.headers.get("retry-after");
+      if (ra) error.retryAfterSeconds = Number(ra) || undefined;
+      if (error.backpressure) error.message = error.backpressure.message;
+    }
+    throw error;
   }
   await consumeSse(
     res,

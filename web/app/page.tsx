@@ -13,6 +13,7 @@ import {
   Loader2,
   Send,
   Sparkles,
+  Timer,
   XCircle,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,6 +22,7 @@ import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { TraceSidebar } from "@/components/TraceSidebar";
 import { ApiError, getMetrics, runQueryStream } from "@/lib/api";
 import type {
+  BackpressureDetail,
   Citation,
   ClaimVerifierMode,
   MetricsSnapshot,
@@ -125,6 +127,11 @@ export default function Home() {
   const [response, setResponse] = useState<QueryResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [backpressure, setBackpressure] = useState<{
+    detail?: BackpressureDetail;
+    retryAfterSeconds?: number;
+    message: string;
+  } | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -166,6 +173,7 @@ export default function Home() {
     setLoading(true);
     setStreaming(true);
     setError(null);
+    setBackpressure(null);
     setResponse(emptyStreamingResponse());
 
     const request: QueryRequest = {
@@ -214,8 +222,19 @@ export default function Home() {
       refreshMetrics();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Query failed";
-      setError(message);
+      // 429s come back as a typed ApiError. Surface them through a
+      // dedicated banner instead of the generic error one so the user
+      // sees the retry guidance and the engine-busy framing.
+      if (err instanceof ApiError && err.status === 429) {
+        setBackpressure({
+          detail: err.backpressure,
+          retryAfterSeconds: err.retryAfterSeconds,
+          message: err.message,
+        });
+      } else {
+        const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Query failed";
+        setError(message);
+      }
       // The streaming placeholder we set at submit-start would otherwise stay
       // on screen as a hollow "Grounded Answer" card alongside the error.
       setResponse(null);
@@ -310,6 +329,19 @@ export default function Home() {
               onStructuredChange={setStructuredOverride}
             />
           </form>
+
+          {backpressure ? (
+            <BackpressureBanner
+              detail={backpressure.detail}
+              retryAfterSeconds={backpressure.retryAfterSeconds}
+              message={backpressure.message}
+              onRetry={() => {
+                setBackpressure(null);
+                void submit();
+              }}
+              onDismiss={() => setBackpressure(null)}
+            />
+          ) : null}
 
           {error ? (
             <div className="rounded-lg border border-danger/40 bg-danger/10 p-4 text-sm">
@@ -656,6 +688,79 @@ function OverridePicker({
       {hint && (
         <p className="text-subtle mt-1.5 text-[11px] leading-snug">{hint}</p>
       )}
+    </div>
+  );
+}
+
+function BackpressureBanner({
+  detail,
+  retryAfterSeconds,
+  message,
+  onRetry,
+  onDismiss,
+}: {
+  detail?: BackpressureDetail;
+  retryAfterSeconds?: number;
+  message: string;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const initial = retryAfterSeconds ?? 0;
+  const [remaining, setRemaining] = useState(initial);
+
+  useEffect(() => {
+    setRemaining(initial);
+    if (initial <= 0) return;
+    const id = window.setInterval(() => {
+      setRemaining((v) => (v <= 1 ? 0 : v - 1));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [initial]);
+
+  const ready = remaining <= 0;
+
+  return (
+    <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2 font-medium text-warning">
+          <Timer size={17} className="mt-0.5 shrink-0" />
+          Engine busy
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-subtle hover:text-[var(--color-fg)] text-xs"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+      <p className="mt-2 text-muted">
+        {detail ? (
+          <>
+            The {detail.kind} limiter is full ({detail.in_flight}/{detail.limit}{" "}
+            in flight). New requests are being rejected to keep latency
+            bounded.
+          </>
+        ) : (
+          message
+        )}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={!ready}
+          className="bg-elev hover:border-strong inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {ready ? "Retry now" : `Retry in ${remaining}s`}
+        </button>
+        {retryAfterSeconds !== undefined && (
+          <span className="text-subtle font-mono text-[11px]">
+            Retry-After: {retryAfterSeconds}s
+          </span>
+        )}
+      </div>
     </div>
   );
 }

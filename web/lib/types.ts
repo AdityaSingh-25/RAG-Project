@@ -54,6 +54,15 @@ export interface QueryRequest {
   structured_answers?: boolean | null;
 }
 
+export type BackpressureKind = "query" | "ingest";
+
+export interface LimiterStats {
+  limit: number;
+  in_flight: number;
+  accepted_total: number;
+  rejected_total: number;
+}
+
 export interface MetricsSnapshot {
   totals: Record<string, number>;
   samples: Record<
@@ -66,6 +75,18 @@ export interface MetricsSnapshot {
       max: number;
     }
   >;
+  /** Per-limiter snapshot. Optional so older deployments — anything before
+   *  Backend Phase 22 — still parse cleanly. */
+  backpressure?: Record<BackpressureKind, LimiterStats>;
+}
+
+/** Structured detail returned by the API alongside a 429. */
+export interface BackpressureDetail {
+  error: "backpressure";
+  kind: BackpressureKind;
+  in_flight: number;
+  limit: number;
+  message: string;
 }
 
 export interface IngestRequest {
