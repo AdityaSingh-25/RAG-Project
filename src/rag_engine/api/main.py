@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import shutil
 import uuid
 from functools import lru_cache
@@ -8,7 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -16,6 +17,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
 from rag_engine.agents.graph import ANSWER_TOKEN_CHANNEL, build_graph
+from rag_engine.api.auth import (
+    ANONYMOUS_IDENTITY,
+    ApiKeyRegistry,
+    RateLimitExceeded,
+    parse_keys_csv,
+)
 from rag_engine.cache import answer_cache
 from rag_engine.cache.store import CacheStore
 from rag_engine.config.settings import get_settings
@@ -57,6 +64,71 @@ def _get_answer_store() -> CacheStore | None:
 @lru_cache(maxsize=1)
 def _get_qdrant_client() -> QdrantClient:
     return QdrantClient(url=settings.qdrant_url)
+
+
+@lru_cache(maxsize=1)
+def _get_auth_registry() -> ApiKeyRegistry:
+    return ApiKeyRegistry(
+        parse_keys_csv(settings.api_keys_csv),
+        settings.rate_limit_per_minute,
+        settings.rate_limit_burst,
+    )
+
+
+async def require_api_key(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> str:
+    """FastAPI dependency: authenticate + charge one rate-limit token.
+
+    Returns the caller's identity (a SHA-256 hex digest when auth is on,
+    or ``ANONYMOUS_IDENTITY`` when it's off) so endpoint code can log it
+    alongside the trace id. Raises ``HTTPException`` for 401 (auth) or
+    429 (rate limit) — the matching counters increment as a side effect.
+    """
+    registry = _get_auth_registry()
+    try:
+        identity = registry.authenticate(x_api_key)
+    except PermissionError as exc:
+        counters().increment("api.auth.unauthenticated.total")
+        log_event(
+            _logger,
+            "api.auth.rejected",
+            trace_id=uuid.uuid4().hex,
+            reason=str(exc),
+            level=logging.WARNING,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "unauthenticated", "message": str(exc)},
+            headers={"WWW-Authenticate": "ApiKey"},
+        ) from exc
+    try:
+        registry.consume(identity)
+    except RateLimitExceeded as exc:
+        counters().increment("api.rate_limit.rejected.total")
+        log_event(
+            _logger,
+            "api.rate_limit.rejected",
+            trace_id=uuid.uuid4().hex,
+            identity=identity,
+            wait_seconds=round(exc.wait_seconds, 2),
+            level=logging.WARNING,
+        )
+        # Round up so a sub-second wait still gives the client a sensible
+        # integer to back off on. ``Retry-After`` must be an integer when
+        # expressed in seconds per RFC 9110.
+        retry_after = max(1, math.ceil(exc.wait_seconds))
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limited",
+                "limit_per_minute": exc.limit_per_minute,
+                "retry_after_seconds": retry_after,
+                "message": str(exc),
+            },
+            headers={"Retry-After": str(retry_after)},
+        ) from exc
+    return identity
 
 
 def _aggregate_sources() -> tuple[int, dict[str, int]]:
@@ -115,11 +187,13 @@ def health() -> dict[str, str]:
 
 @app.get("/metrics")
 def metrics() -> dict[str, Any]:
-    return counters().snapshot()
+    snap = counters().snapshot()
+    snap["auth"] = _get_auth_registry().snapshot()
+    return snap
 
 
 @app.get("/corpus/stats")
-def corpus_stats() -> dict[str, Any]:
+def corpus_stats(_identity: str = Depends(require_api_key)) -> dict[str, Any]:
     """Summary counts for the indexed corpus."""
     try:
         total, by_source = _aggregate_sources()
@@ -135,7 +209,7 @@ def corpus_stats() -> dict[str, Any]:
 
 
 @app.get("/corpus/sources")
-def corpus_sources() -> dict[str, Any]:
+def corpus_sources(_identity: str = Depends(require_api_key)) -> dict[str, Any]:
     """Per-source chunk counts, sorted with the heaviest contributors first."""
     try:
         _, by_source = _aggregate_sources()
@@ -161,6 +235,7 @@ _CORPUS_SOURCE_MAX_CHUNKS = 500
 @app.get("/corpus/source")
 def corpus_source(
     path: str = Query(..., description="Exact metadata.source value to inspect"),
+    _identity: str = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Every chunk indexed from a given source, in chunk_id order."""
     client = _get_qdrant_client()
@@ -218,7 +293,10 @@ def corpus_source(
 
 
 @app.post("/query")
-async def query(request: QueryRequest) -> dict[str, Any]:
+async def query(
+    request: QueryRequest,
+    _identity: str = Depends(require_api_key),
+) -> dict[str, Any]:
     trace_id = uuid.uuid4().hex
     counters().increment("api.query.total")
     store = _get_answer_store()
@@ -306,7 +384,10 @@ def _initial_state(request: QueryRequest, trace_id: str) -> dict[str, Any]:
 
 
 @app.post("/query/stream")
-async def query_stream(request: QueryRequest) -> StreamingResponse:
+async def query_stream(
+    request: QueryRequest,
+    _identity: str = Depends(require_api_key),
+) -> StreamingResponse:
     """SSE variant of /query.
 
     Emits these event types:
@@ -432,7 +513,10 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
 
 
 @app.post("/ingest")
-def ingest(request: IngestRequest) -> dict[str, Any]:
+def ingest(
+    request: IngestRequest,
+    _identity: str = Depends(require_api_key),
+) -> dict[str, Any]:
     source = Path(request.source_path)
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path does not exist: {source}")
@@ -450,7 +534,10 @@ _ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".csv", ".json", ".txt", ".md", ".rst"}
 
 
 @app.post("/ingest/upload")
-async def ingest_upload(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+async def ingest_upload(
+    files: list[UploadFile] = File(...),
+    _identity: str = Depends(require_api_key),
+) -> dict[str, Any]:
     trace_id = uuid.uuid4().hex
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
