@@ -11,9 +11,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LatencyChart } from "@/components/charts/LatencyChart";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { ApiError, getMetrics } from "@/lib/api";
-import type { MetricsSnapshot } from "@/lib/types";
+import type { BackpressureKind, LimiterStats, MetricsSnapshot } from "@/lib/types";
 import {
   pluckCacheRateSeries,
+  pluckInFlightSeries,
+  pluckRejectionRate,
   pluckSampleSeries,
   useMetricsHistory,
   type HistoryPoint,
@@ -199,6 +201,13 @@ export default function MetricsPage() {
         <div className="space-y-8">
           <QueryLatencyCard history={history} />
 
+          {snapshot.backpressure && (
+            <BackpressureSection
+              backpressure={snapshot.backpressure}
+              history={history}
+            />
+          )}
+
           {cacheStats.length > 0 && (
             <CacheSection stats={cacheStats} history={history} />
           )}
@@ -255,6 +264,124 @@ function QueryLatencyCard({ history }: { history: HistoryPoint[] }) {
         emptyHint="Run a few queries — points show up once the buffer has 2+ samples"
       />
     </section>
+  );
+}
+
+function BackpressureSection({
+  backpressure,
+  history,
+}: {
+  backpressure: Record<BackpressureKind, LimiterStats>;
+  history: HistoryPoint[];
+}) {
+  // Stable order: query first because it's the noisier one.
+  const kinds: BackpressureKind[] = ["query", "ingest"];
+  return (
+    <section>
+      <SectionTitle>Backpressure</SectionTitle>
+      <p className="text-subtle mt-0.5 text-xs">
+        Concurrency limiters on heavy endpoints. Rejected requests get 429 + Retry-After.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {kinds.map((kind) => (
+          <LimiterCard
+            key={kind}
+            kind={kind}
+            stats={backpressure[kind]}
+            history={history}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LimiterCard({
+  kind,
+  stats,
+  history,
+}: {
+  kind: BackpressureKind;
+  stats: LimiterStats;
+  history: HistoryPoint[];
+}) {
+  const inFlightSeries = pluckInFlightSeries(history, kind);
+  const rejectionSeries = pluckRejectionRate(history, kind);
+  const utilisation = stats.limit > 0 ? stats.in_flight / stats.limit : 0;
+  // 80%+ utilisation → start tinting the badge so it's obvious at a glance.
+  const hot = utilisation >= 0.8;
+  return (
+    <div className="bg-elev rounded-lg border p-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <div>
+          <div className="text-muted text-xs uppercase tracking-wider">
+            {kind}
+          </div>
+          <div className="mt-1 flex items-baseline gap-2">
+            <div
+              className="text-2xl font-semibold tabular-nums"
+              style={{
+                color: hot
+                  ? "var(--color-warning)"
+                  : "var(--color-accent)",
+              }}
+            >
+              {stats.in_flight}
+            </div>
+            <div className="text-subtle font-mono text-[12px]">
+              / {stats.limit} in flight
+            </div>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-subtle font-mono text-[11px]">
+            {formatTotal(stats.accepted_total)} accepted
+          </div>
+          <div
+            className="font-mono text-[11px]"
+            style={{
+              color:
+                stats.rejected_total > 0
+                  ? "var(--color-warning)"
+                  : "var(--color-fg-muted)",
+            }}
+          >
+            {formatTotal(stats.rejected_total)} rejected
+          </div>
+        </div>
+      </div>
+      <div className="mt-3">
+        <div className="text-subtle mb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest">
+          <span>in_flight</span>
+          <span>{inFlightSeries.length} samples</span>
+        </div>
+        <Sparkline
+          values={inFlightSeries}
+          width={260}
+          height={28}
+          stroke={hot ? "var(--color-warning)" : "var(--color-accent)"}
+          fillOpacity={0.12}
+          yMin={0}
+          yMax={Math.max(stats.limit, 1)}
+          className="w-full"
+        />
+      </div>
+      <div className="mt-3">
+        <div className="text-subtle mb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest">
+          <span>rejections / 2s</span>
+          <span>{rejectionSeries.reduce((a, b) => a + b, 0)} in window</span>
+        </div>
+        <Sparkline
+          values={rejectionSeries}
+          width={260}
+          height={28}
+          stroke="var(--color-warning)"
+          fillOpacity={0.12}
+          yMin={0}
+          className="w-full"
+        />
+      </div>
+    </div>
   );
 }
 

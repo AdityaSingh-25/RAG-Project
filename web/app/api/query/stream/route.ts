@@ -17,7 +17,10 @@ export async function POST(req: NextRequest) {
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => upstream.statusText);
-      return new NextResponse(text, { status: upstream.status });
+      const headers: Record<string, string> = {};
+      const retryAfter = upstream.headers.get("retry-after");
+      if (retryAfter) headers["Retry-After"] = retryAfter;
+      return new NextResponse(text, { status: upstream.status, headers });
     }
 
     // Pipe the SSE body through unchanged. X-Accel-Buffering keeps the stream

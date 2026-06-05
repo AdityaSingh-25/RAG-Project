@@ -15,9 +15,14 @@ export async function POST(req: NextRequest) {
       body,
     });
     const text = await res.text();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    // 429 backpressure responses include Retry-After. The browser cares,
+    // but only if we forward it through the proxy.
+    const retryAfter = res.headers.get("retry-after");
+    if (retryAfter) headers["Retry-After"] = retryAfter;
     return new NextResponse(text, {
       status: res.status,
-      headers: { "Content-Type": "application/json" },
+      headers,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown";
