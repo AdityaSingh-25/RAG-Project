@@ -7,7 +7,6 @@ shapes, and that headers (Retry-After, WWW-Authenticate) survive."""
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pytest

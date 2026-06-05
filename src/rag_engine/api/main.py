@@ -20,7 +20,6 @@ from qdrant_client.http import models as qdrant_models
 
 from rag_engine.agents.graph import ANSWER_TOKEN_CHANNEL, build_graph
 from rag_engine.api.auth import (
-    ANONYMOUS_IDENTITY,
     ApiKeyRegistry,
     RateLimitExceeded,
     parse_keys_csv,
