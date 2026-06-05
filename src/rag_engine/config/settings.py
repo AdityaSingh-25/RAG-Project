@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     eval_baseline_grounding: float = Field(default=0.0, ge=0.0, le=1.0)
     eval_baseline_status_match_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # Backpressure: fail-fast when too many requests are already in flight.
+    # /query gets a higher ceiling than /ingest because ingest is IO-heavy
+    # and competes for disk + Qdrant write throughput.
+    max_concurrent_queries: int = Field(default=4, ge=1, le=64)
+    max_concurrent_ingest: int = Field(default=1, ge=1, le=16)
+    backpressure_retry_after_seconds: int = Field(default=5, ge=1, le=300)
+
     langchain_tracing_v2: bool = False
     langchain_project: str = "rag-multi-agent-engine"
     langchain_api_key: str | None = None

@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
 import math
 import shutil
 import uuid
+from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,7 +28,18 @@ from rag_engine.api.auth import (
 from rag_engine.cache import answer_cache
 from rag_engine.cache.store import CacheStore
 from rag_engine.config.settings import get_settings
+from rag_engine.evaluation.harness import (
+    EvalCase,
+    EvalResult,
+    citation_hit_rate,
+    load_cases,
+    term_recall,
+)
 from rag_engine.ingestion.pipeline import ingest_path
+from rag_engine.observability.backpressure import (
+    BackpressureError,
+    ConcurrencyLimiter,
+)
 from rag_engine.observability.counters import counters
 from rag_engine.observability.logging import configure_logging, get_logger, log_event, now_ms
 from rag_engine.observability.tracing import configure_tracing
@@ -67,11 +80,51 @@ def _get_qdrant_client() -> QdrantClient:
 
 
 @lru_cache(maxsize=1)
+def _query_limiter() -> ConcurrencyLimiter:
+    return ConcurrencyLimiter("query", settings.max_concurrent_queries)
+
+
+@lru_cache(maxsize=1)
+def _ingest_limiter() -> ConcurrencyLimiter:
+    return ConcurrencyLimiter("ingest", settings.max_concurrent_ingest)
+
+
+@lru_cache(maxsize=1)
 def _get_auth_registry() -> ApiKeyRegistry:
     return ApiKeyRegistry(
         parse_keys_csv(settings.api_keys_csv),
         settings.rate_limit_per_minute,
         settings.rate_limit_burst,
+    )
+
+
+def _backpressure_response(
+    exc: BackpressureError, trace_id: str | None = None
+) -> HTTPException:
+    """Translate a limiter rejection into a 429 with a Retry-After header.
+
+    The header value is a hint, not a contract — clients that respect it
+    will back off; clients that don't will just see another 429."""
+    counters().increment(f"api.backpressure.rejected.{exc.name}")
+    log_event(
+        _logger,
+        "api.backpressure.rejected",
+        trace_id=trace_id or uuid.uuid4().hex,
+        kind=exc.name,
+        in_flight=exc.in_flight,
+        limit=exc.limit,
+        level=logging.WARNING,
+    )
+    return HTTPException(
+        status_code=429,
+        detail={
+            "error": "backpressure",
+            "kind": exc.name,
+            "in_flight": exc.in_flight,
+            "limit": exc.limit,
+            "message": str(exc),
+        },
+        headers={"Retry-After": str(settings.backpressure_retry_after_seconds)},
     )
 
 
@@ -180,16 +233,228 @@ class IngestRequest(BaseModel):
     source_path: str = "data/raw"
 
 
+class EvalRunRequest(BaseModel):
+    dataset: Literal["seed", "adversarial"] = "seed"
+    # Capped per-call so a curious click on a slow stack doesn't hang the UI
+    # for 30+ minutes. ``None`` means "run everything".
+    limit: int | None = Field(default=5, ge=1, le=100)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "environment": settings.app_env}
 
 
+@app.get("/livez")
+def livez() -> dict[str, str]:
+    """Liveness probe: process is up and the event loop is responsive.
+
+    Intentionally does not touch Qdrant or Ollama — orchestrators poll
+    this every second or two and we don't want to amplify load. Use
+    /health for component-level readiness."""
+    return {"status": "ok"}
+
+
 @app.get("/metrics")
 def metrics() -> dict[str, Any]:
     snap = counters().snapshot()
+    snap["backpressure"] = {
+        "query": _query_limiter().snapshot(),
+        "ingest": _ingest_limiter().snapshot(),
+    }
     snap["auth"] = _get_auth_registry().snapshot()
     return snap
+
+
+_EVAL_DATASETS: dict[str, Path] = {
+    "seed": Path("data/eval/seed_cases.jsonl"),
+    "adversarial": Path("data/eval/adversarial_cases.jsonl"),
+}
+
+
+def _aggregate_eval(results: list[EvalResult]) -> dict[str, float]:
+    """Mirrors `harness.evaluate_dataset`'s aggregate block. Kept local rather
+    than reused because the harness ships a sync runner and we drive the
+    graph async, but the math is identical."""
+    n = len(results)
+    if n == 0:
+        return {
+            "n": 0.0,
+            "mean_grounding": 0.0,
+            "mean_citation_hit_rate": 0.0,
+            "mean_term_recall": 0.0,
+            "mean_latency_ms": 0.0,
+            "mean_iteration": 0.0,
+            "insufficient_evidence_rate": 0.0,
+            "mean_grounded_claim_rate": 0.0,
+            "status_match_rate": 0.0,
+        }
+    insufficient = sum(1 for r in results if r.status == "insufficient_evidence")
+    status_matches = sum(1 for r in results if r.status_matches_expected)
+    return {
+        "n": float(n),
+        "mean_grounding": round(sum(r.grounding_score for r in results) / n, 3),
+        "mean_citation_hit_rate": round(
+            sum(r.citation_hit_rate for r in results) / n, 3
+        ),
+        "mean_term_recall": round(sum(r.term_recall for r in results) / n, 3),
+        "mean_latency_ms": round(sum(r.latency_ms for r in results) / n, 2),
+        "mean_iteration": round(sum(r.iteration for r in results) / n, 2),
+        "insufficient_evidence_rate": round(insufficient / n, 3),
+        "mean_grounded_claim_rate": round(
+            sum(r.grounded_claim_rate for r in results) / n, 3
+        ),
+        "status_match_rate": round(status_matches / n, 3),
+    }
+
+
+async def _run_one_case(case: EvalCase, graph: Any) -> EvalResult:
+    started = now_ms()
+    state = await graph.ainvoke(
+        {
+            "question": case.question,
+            "original_question": case.question,
+            "filters": {},
+            "documents": [],
+            "answer": "",
+            "citations": [],
+            "grounding_score": 0.0,
+            "warnings": [],
+            "iteration": 0,
+            "status": "",
+            "trace_id": uuid.uuid4().hex,
+            "grounded_claim_rate": 1.0,
+            "claim_grounding": [],
+            "pipeline_trace": [],
+            "override_claim_verifier_mode": None,
+            "override_structured_answers": None,
+        }
+    )
+    latency_ms = now_ms() - started
+    answer = str(state.get("answer", ""))
+    citations = list(state.get("citations", []))
+    status = str(state.get("status") or "ok")
+    return EvalResult(
+        case_id=case.id,
+        question=case.question,
+        answer=answer,
+        grounding_score=float(state.get("grounding_score", 0.0)),
+        citation_hit_rate=citation_hit_rate(citations, case.must_cite),
+        term_recall=term_recall(answer, case.expected_terms),
+        iteration=int(state.get("iteration", 0)),
+        warnings=list(state.get("warnings", [])),
+        latency_ms=round(latency_ms, 2),
+        grounded_claim_rate=float(state.get("grounded_claim_rate", 1.0)),
+        status=status,
+        expected_status=case.expected_status,
+        status_matches_expected=(status == case.expected_status),
+        citations=citations,
+    )
+
+
+@app.post("/eval/run")
+async def eval_run(
+    request: EvalRunRequest,
+    _identity: str = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Run the eval harness against the live graph and return the report.
+
+    Synchronous from the caller's perspective: the full dataset (capped by
+    `limit`) is executed in-process before the response is returned. For
+    long runs the caller is responsible for keeping the connection open.
+    """
+    cases_path = _EVAL_DATASETS.get(request.dataset)
+    if cases_path is None or not cases_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Eval dataset not found: {request.dataset}"
+        )
+    try:
+        graph = _get_graph()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+
+    cases = load_cases(cases_path)
+    if request.limit is not None:
+        cases = cases[: request.limit]
+
+    results: list[EvalResult] = []
+    for case in cases:
+        results.append(await _run_one_case(case, graph))
+
+    counters().increment("api.eval.runs.total")
+    counters().increment(f"api.eval.runs.dataset.{request.dataset}")
+    return {
+        "dataset": request.dataset,
+        "limit": request.limit,
+        "total_cases_available": len(load_cases(cases_path)),
+        "aggregate": _aggregate_eval(results),
+        "results": [asdict(r) for r in results],
+    }
+
+
+@app.post("/eval/stream")
+async def eval_stream(
+    request: EvalRunRequest,
+    _identity: str = Depends(require_api_key),
+) -> StreamingResponse:
+    """SSE variant of /eval/run.
+
+    Emits these event types:
+      - ``started`` : dataset metadata + how many cases will run
+      - ``case``    : one EvalResult per completed case, with `index`
+      - ``error``   : per-case exceptions; the loop keeps going to the next
+      - ``aggregate``: final aggregate computed across the cases that succeeded
+    """
+    cases_path = _EVAL_DATASETS.get(request.dataset)
+    if cases_path is None or not cases_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"Eval dataset not found: {request.dataset}"
+        )
+    try:
+        graph = _get_graph()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Backend not ready: {exc}"
+        ) from exc
+
+    all_cases = load_cases(cases_path)
+    cases = all_cases if request.limit is None else all_cases[: request.limit]
+
+    async def gen():
+        yield _sse(
+            "started",
+            {
+                "dataset": request.dataset,
+                "limit": request.limit,
+                "total": len(cases),
+                "total_cases_available": len(all_cases),
+            },
+        )
+        results: list[EvalResult] = []
+        for index, case in enumerate(cases):
+            try:
+                result = await _run_one_case(case, graph)
+            except Exception as exc:
+                # Surface the failure but keep going — one bad case shouldn't
+                # tank the whole run. The aggregate will reflect only the
+                # cases that successfully produced a result.
+                yield _sse(
+                    "error",
+                    {"index": index, "case_id": case.id, "detail": str(exc)},
+                )
+                continue
+            results.append(result)
+            yield _sse("case", {"index": index, "result": asdict(result)})
+        yield _sse(
+            "aggregate",
+            {"aggregate": _aggregate_eval(results), "completed": len(results)},
+        )
+
+    counters().increment("api.eval.streams.total")
+    counters().increment(f"api.eval.streams.dataset.{request.dataset}")
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/corpus/stats")
@@ -300,6 +565,9 @@ async def query(
     trace_id = uuid.uuid4().hex
     counters().increment("api.query.total")
     store = _get_answer_store()
+    # Cache hits are intentionally NOT counted against the limiter: they
+    # don't touch the graph, return in microseconds, and limiting them
+    # would mostly hurt the dashboard polling case.
     if store is not None and not request.bypass_cache:
         cached = answer_cache.get(store, request.question)
         if cached is not None:
@@ -311,6 +579,18 @@ async def query(
             )
             return {**cached, "trace_id": trace_id, "cached": True}
 
+    try:
+        async with _query_limiter().acquire():
+            return await _run_query(request, trace_id, store)
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
+
+
+async def _run_query(
+    request: QueryRequest,
+    trace_id: str,
+    store: CacheStore | None,
+) -> dict[str, Any]:
     started = now_ms()
     try:
         graph = _get_graph()
@@ -432,98 +712,120 @@ async def query_stream(
         )
         raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
 
+    # Acquire the slot before returning so a rejection comes back as a
+    # real 429, not as an in-band SSE `error` event after the response
+    # has already started streaming. The matching release lives in the
+    # generator's `finally` so the slot is held for the whole stream
+    # lifetime — including client disconnects mid-stream.
+    limiter = _query_limiter()
+    try:
+        await limiter.acquire_slot()
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
+
     initial = _initial_state(request, trace_id)
 
     async def gen():
         started = now_ms()
         final_state: dict | None = None
         try:
-            async for mode, chunk in graph.astream(
-                initial, stream_mode=["custom", "updates", "values"]
-            ):
-                if mode == "custom":
-                    if isinstance(chunk, dict) and ANSWER_TOKEN_CHANNEL in chunk:
-                        yield _sse("token", {"delta": chunk[ANSWER_TOKEN_CHANNEL]})
-                elif mode == "updates":
-                    for _node, diff in (chunk or {}).items():
-                        trace = (diff or {}).get("pipeline_trace") or []
-                        if trace:
-                            yield _sse("trace", trace[-1])
-                elif mode == "values":
-                    final_state = chunk
-        except Exception as exc:
-            log_event(
-                _logger,
-                "api.query.stream_error",
-                trace_id=trace_id,
-                error=str(exc),
-                level=logging.ERROR,
+            try:
+                async for mode, chunk in graph.astream(
+                    initial, stream_mode=["custom", "updates", "values"]
+                ):
+                    if mode == "custom":
+                        if isinstance(chunk, dict) and ANSWER_TOKEN_CHANNEL in chunk:
+                            yield _sse("token", {"delta": chunk[ANSWER_TOKEN_CHANNEL]})
+                    elif mode == "updates":
+                        for _node, diff in (chunk or {}).items():
+                            trace = (diff or {}).get("pipeline_trace") or []
+                            if trace:
+                                yield _sse("trace", trace[-1])
+                    elif mode == "values":
+                        final_state = chunk
+            except Exception as exc:
+                log_event(
+                    _logger,
+                    "api.query.stream_error",
+                    trace_id=trace_id,
+                    error=str(exc),
+                    level=logging.ERROR,
+                )
+                yield _sse("error", {"detail": str(exc)})
+                return
+
+            if final_state is None:
+                yield _sse("error", {"detail": "graph produced no final state"})
+                return
+
+            duration = now_ms() - started
+            counters().observe("api.query.latency_ms", duration)
+            status = final_state.get("status") or "ok"
+            counters().increment(f"api.query.status.{status}")
+
+            yield _sse("citations", {"citations": final_state.get("citations", [])})
+            yield _sse(
+                "grounding",
+                {
+                    "grounding_score": final_state.get("grounding_score", 0.0),
+                    "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
+                    "claim_grounding": final_state.get("claim_grounding", []),
+                    "warnings": final_state.get("warnings", []),
+                },
             )
-            yield _sse("error", {"detail": str(exc)})
-            return
 
-        if final_state is None:
-            yield _sse("error", {"detail": "graph produced no final state"})
-            return
-
-        duration = now_ms() - started
-        counters().observe("api.query.latency_ms", duration)
-        status = final_state.get("status") or "ok"
-        counters().increment(f"api.query.status.{status}")
-
-        yield _sse("citations", {"citations": final_state.get("citations", [])})
-        yield _sse(
-            "grounding",
-            {
+            payload = {
+                "answer": final_state.get("answer", ""),
+                "citations": final_state.get("citations", []),
                 "grounding_score": final_state.get("grounding_score", 0.0),
+                "warnings": final_state.get("warnings", []),
+                "iteration": final_state.get("iteration", 0),
+                "status": status,
                 "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
                 "claim_grounding": final_state.get("claim_grounding", []),
-                "warnings": final_state.get("warnings", []),
-            },
-        )
+                "pipeline_trace": final_state.get("pipeline_trace", []),
+                "total_duration_ms": round(duration, 2),
+            }
+            if store is not None and status == "ok":
+                answer_cache.put(store, request.question, payload)
 
-        payload = {
-            "answer": final_state.get("answer", ""),
-            "citations": final_state.get("citations", []),
-            "grounding_score": final_state.get("grounding_score", 0.0),
-            "warnings": final_state.get("warnings", []),
-            "iteration": final_state.get("iteration", 0),
-            "status": status,
-            "grounded_claim_rate": final_state.get("grounded_claim_rate", 1.0),
-            "claim_grounding": final_state.get("claim_grounding", []),
-            "pipeline_trace": final_state.get("pipeline_trace", []),
-            "total_duration_ms": round(duration, 2),
-        }
-        if store is not None and status == "ok":
-            answer_cache.put(store, request.question, payload)
-
-        log_event(
-            _logger,
-            "api.query.complete",
-            trace_id=trace_id,
-            duration_ms=round(duration, 2),
-            status=status,
-            iteration=final_state.get("iteration", 0),
-            grounding_score=final_state.get("grounding_score", 0.0),
-            streaming=True,
-        )
-        yield _sse("done", {**payload, "trace_id": trace_id, "cached": False})
+            log_event(
+                _logger,
+                "api.query.complete",
+                trace_id=trace_id,
+                duration_ms=round(duration, 2),
+                status=status,
+                iteration=final_state.get("iteration", 0),
+                grounding_score=final_state.get("grounding_score", 0.0),
+                streaming=True,
+            )
+            yield _sse("done", {**payload, "trace_id": trace_id, "cached": False})
+        finally:
+            await limiter.release_slot()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/ingest")
-def ingest(
+async def ingest(
     request: IngestRequest,
     _identity: str = Depends(require_api_key),
 ) -> dict[str, Any]:
     source = Path(request.source_path)
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path does not exist: {source}")
-    report = ingest_path(source, settings)
+    try:
+        async with _ingest_limiter().acquire():
+            # ``ingest_path`` is synchronous and IO-heavy; pushing it to a
+            # worker thread keeps the event loop free to keep serving
+            # /query and /livez while ingest runs.
+            report = await asyncio.to_thread(ingest_path, source, settings)
+    except BackpressureError as exc:
+        raise _backpressure_response(exc) from exc
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
+        "cross_run_duplicates_removed": report.cross_run_duplicates_removed,
     }
 
 
@@ -556,35 +858,40 @@ async def ingest_upload(
                 ),
             )
 
-    with TemporaryDirectory(prefix="rag-upload-") as tmp:
-        tmp_path = Path(tmp)
-        for upload in files:
-            # Strip any path components from the client — only keep the basename
-            # so a malicious filename like "../etc/passwd" can't escape the
-            # temp dir. `Path(...).name` returns only the final component.
-            safe_name = Path(upload.filename or "upload").name
-            target = tmp_path / safe_name
-            with target.open("wb") as out:
-                shutil.copyfileobj(upload.file, out)
-            await upload.close()
-        try:
-            report = ingest_path(tmp_path, settings)
-        except Exception as exc:
-            log_event(
-                _logger,
-                "api.ingest.upload.failed",
-                trace_id=trace_id,
-                error=str(exc),
-                file_count=len(files),
-                level=logging.ERROR,
-            )
-            raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
+    try:
+        async with _ingest_limiter().acquire():
+            with TemporaryDirectory(prefix="rag-upload-") as tmp:
+                tmp_path = Path(tmp)
+                for upload in files:
+                    # Strip any path components from the client — only keep the basename
+                    # so a malicious filename like "../etc/passwd" can't escape the
+                    # temp dir. `Path(...).name` returns only the final component.
+                    safe_name = Path(upload.filename or "upload").name
+                    target = tmp_path / safe_name
+                    with target.open("wb") as out:
+                        shutil.copyfileobj(upload.file, out)
+                    await upload.close()
+                try:
+                    report = await asyncio.to_thread(ingest_path, tmp_path, settings)
+                except Exception as exc:
+                    log_event(
+                        _logger,
+                        "api.ingest.upload.failed",
+                        trace_id=trace_id,
+                        error=str(exc),
+                        file_count=len(files),
+                        level=logging.ERROR,
+                    )
+                    raise HTTPException(status_code=503, detail=f"Backend not ready: {exc}") from exc
+    except BackpressureError as exc:
+        raise _backpressure_response(exc, trace_id=trace_id) from exc
 
     counters().increment("api.ingest.upload.total")
     counters().increment("api.ingest.upload.files", amount=len(files))
     return {
         "ingested_chunks": report.indexed,
         "duplicates_removed": report.duplicates_removed,
+        "cross_run_duplicates_removed": report.cross_run_duplicates_removed,
         "files_received": len(files),
     }
 

@@ -4,11 +4,16 @@
 
 import { consumeSse } from "./sse";
 import type {
+  BackpressureDetail,
   Citation,
   ClaimGrounding,
   CorpusSourceDetail,
   CorpusSourcesResponse,
   CorpusStats,
+  EvalAggregate,
+  EvalCaseResult,
+  EvalReport,
+  EvalRequest,
   IngestRequest,
   IngestResponse,
   MetricsSnapshot,
@@ -18,16 +23,51 @@ import type {
 } from "./types";
 
 export class ApiError extends Error {
+  /** Parsed backpressure detail when the server pushed back with a 429.
+   *  `undefined` for any other error. */
+  backpressure?: BackpressureDetail;
+  /** Seconds the server suggested waiting before retrying. */
+  retryAfterSeconds?: number;
   constructor(message: string, public status: number) {
     super(message);
     this.name = "ApiError";
   }
 }
 
+/** Try to pluck a structured backpressure detail out of a 429 body. The body
+ *  shape is `{"detail": {error: "backpressure", kind, in_flight, limit, message}}`
+ *  — anything else falls through to a plain ApiError. */
+function tryParseBackpressure(body: string): BackpressureDetail | undefined {
+  try {
+    const parsed = JSON.parse(body);
+    const detail = parsed?.detail;
+    if (
+      detail &&
+      typeof detail === "object" &&
+      detail.error === "backpressure" &&
+      (detail.kind === "query" || detail.kind === "ingest")
+    ) {
+      return detail as BackpressureDetail;
+    }
+  } catch {
+    // Not JSON — server returned a plain string body.
+  }
+  return undefined;
+}
+
 async function jsonOrThrow<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const detail = await res.text();
-    throw new ApiError(detail || res.statusText, res.status);
+    const error = new ApiError(detail || res.statusText, res.status);
+    if (res.status === 429) {
+      error.backpressure = tryParseBackpressure(detail);
+      const ra = res.headers.get("retry-after");
+      if (ra) error.retryAfterSeconds = Number(ra) || undefined;
+      if (error.backpressure) {
+        error.message = error.backpressure.message;
+      }
+    }
+    throw error;
   }
   return res.json();
 }
@@ -68,6 +108,81 @@ export async function getCorpusSource(
   return jsonOrThrow<CorpusSourceDetail>(res);
 }
 
+/** Run the eval harness against the live graph. Long-running — callers
+ *  should pass an AbortSignal and show progress UI. */
+export async function runEval(
+  req: EvalRequest,
+  signal?: AbortSignal,
+): Promise<EvalReport> {
+  const res = await fetch("/api/eval/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  return jsonOrThrow<EvalReport>(res);
+}
+
+export interface EvalStreamStartedEvent {
+  dataset: EvalRequest["dataset"];
+  limit: number | null;
+  total: number;
+  total_cases_available: number;
+}
+
+export interface EvalStreamCaseEvent {
+  index: number;
+  result: EvalCaseResult;
+}
+
+export interface EvalStreamAggregateEvent {
+  aggregate: EvalAggregate;
+  completed: number;
+}
+
+export interface EvalStreamErrorEvent {
+  index: number;
+  case_id: string;
+  detail: string;
+}
+
+export interface EvalStreamHandlers {
+  onStarted?: (e: EvalStreamStartedEvent) => void;
+  onCase?: (e: EvalStreamCaseEvent) => void;
+  onAggregate?: (e: EvalStreamAggregateEvent) => void;
+  onCaseError?: (e: EvalStreamErrorEvent) => void;
+}
+
+/** SSE variant. Emits per-case results as they finish so the UI can fill
+ *  rows progressively rather than blocking on the whole dataset. */
+export async function runEvalStream(
+  req: EvalRequest,
+  handlers: EvalStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/eval/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new ApiError(detail || `Eval stream failed (${res.status})`, res.status);
+  }
+  await consumeSse(
+    res,
+    {
+      started: (d) => handlers.onStarted?.(d as EvalStreamStartedEvent),
+      case: (d) => handlers.onCase?.(d as EvalStreamCaseEvent),
+      aggregate: (d) => handlers.onAggregate?.(d as EvalStreamAggregateEvent),
+      error: (d) => handlers.onCaseError?.(d as EvalStreamErrorEvent),
+    },
+    signal,
+  );
+}
+
 export interface GroundingEvent {
   grounding_score: number;
   grounded_claim_rate: number;
@@ -98,7 +213,17 @@ export async function runQueryStream(
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => res.statusText);
-    throw new ApiError(detail || `Stream failed (${res.status})`, res.status);
+    const error = new ApiError(
+      detail || `Stream failed (${res.status})`,
+      res.status,
+    );
+    if (res.status === 429) {
+      error.backpressure = tryParseBackpressure(detail);
+      const ra = res.headers.get("retry-after");
+      if (ra) error.retryAfterSeconds = Number(ra) || undefined;
+      if (error.backpressure) error.message = error.backpressure.message;
+    }
+    throw error;
   }
   await consumeSse(
     res,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { MetricsSnapshot } from "./types";
+import type { BackpressureKind, MetricsSnapshot } from "./types";
 
 export interface HistoryPoint {
   at: number;
@@ -66,4 +66,30 @@ export function pluckCacheRateSeries(
     const total = hits + misses;
     return total === 0 ? 0 : hits / total;
   });
+}
+
+/** In-flight gauge over time for one limiter. Missing → 0 so older
+ *  snapshots taken before the backpressure field existed render flat. */
+export function pluckInFlightSeries(
+  history: HistoryPoint[],
+  kind: BackpressureKind,
+): number[] {
+  return history.map((h) => h.snapshot.backpressure?.[kind]?.in_flight ?? 0);
+}
+
+/** Per-interval count of rejected requests for one limiter — derived
+ *  from the cumulative `rejected_total` counter so the sparkline shows
+ *  *new* rejections rather than the lifetime sum. */
+export function pluckRejectionRate(
+  history: HistoryPoint[],
+  kind: BackpressureKind,
+): number[] {
+  if (history.length < 2) return [];
+  const out: number[] = [];
+  for (let i = 1; i < history.length; i++) {
+    const a = history[i - 1].snapshot.backpressure?.[kind]?.rejected_total ?? 0;
+    const b = history[i].snapshot.backpressure?.[kind]?.rejected_total ?? 0;
+    out.push(Math.max(0, b - a));
+  }
+  return out;
 }

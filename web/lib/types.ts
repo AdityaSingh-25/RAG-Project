@@ -54,6 +54,15 @@ export interface QueryRequest {
   structured_answers?: boolean | null;
 }
 
+export type BackpressureKind = "query" | "ingest";
+
+export interface LimiterStats {
+  limit: number;
+  in_flight: number;
+  accepted_total: number;
+  rejected_total: number;
+}
+
 export interface MetricsSnapshot {
   totals: Record<string, number>;
   samples: Record<
@@ -66,6 +75,18 @@ export interface MetricsSnapshot {
       max: number;
     }
   >;
+  /** Per-limiter snapshot. Optional so older deployments — anything before
+   *  Backend Phase 22 — still parse cleanly. */
+  backpressure?: Record<BackpressureKind, LimiterStats>;
+}
+
+/** Structured detail returned by the API alongside a 429. */
+export interface BackpressureDetail {
+  error: "backpressure";
+  kind: BackpressureKind;
+  in_flight: number;
+  limit: number;
+  message: string;
 }
 
 export interface IngestRequest {
@@ -74,7 +95,10 @@ export interface IngestRequest {
 
 export interface IngestResponse {
   ingested_chunks: number;
+  /** In-batch duplicates: same content_hash appeared twice in this run. */
   duplicates_removed: number;
+  /** Cross-run duplicates: content_hash already lived in Qdrant before. */
+  cross_run_duplicates_removed?: number;
   /** Only present on the multipart /ingest/upload endpoint. */
   files_received?: number;
 }
@@ -106,4 +130,48 @@ export interface CorpusSourceDetail {
   chunks: CorpusChunk[];
   total: number;
   truncated: boolean;
+}
+
+export type EvalDataset = "seed" | "adversarial";
+
+export interface EvalRequest {
+  dataset: EvalDataset;
+  limit?: number | null;
+}
+
+export interface EvalCaseResult {
+  case_id: string;
+  question: string;
+  answer: string;
+  grounding_score: number;
+  citation_hit_rate: number;
+  term_recall: number;
+  iteration: number;
+  warnings: string[];
+  latency_ms: number;
+  grounded_claim_rate: number;
+  status: string;
+  expected_status: string;
+  status_matches_expected: boolean;
+  citations: Array<Record<string, unknown>>;
+}
+
+export interface EvalAggregate {
+  n: number;
+  mean_grounding: number;
+  mean_citation_hit_rate: number;
+  mean_term_recall: number;
+  mean_latency_ms: number;
+  mean_iteration: number;
+  insufficient_evidence_rate: number;
+  mean_grounded_claim_rate: number;
+  status_match_rate: number;
+}
+
+export interface EvalReport {
+  dataset: EvalDataset;
+  limit: number | null;
+  total_cases_available: number;
+  aggregate: EvalAggregate;
+  results: EvalCaseResult[];
 }

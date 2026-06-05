@@ -3,13 +3,17 @@
 import {
   AlertTriangle,
   BarChart3,
+  Check,
   CheckCircle2,
   Clock3,
+  Copy,
   Database,
+  Download,
   FileText,
   Loader2,
   Send,
   Sparkles,
+  Timer,
   XCircle,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,12 +22,19 @@ import { AnswerWithGrounding } from "@/components/AnswerWithGrounding";
 import { TraceSidebar } from "@/components/TraceSidebar";
 import { ApiError, getMetrics, runQueryStream } from "@/lib/api";
 import type {
+  BackpressureDetail,
   Citation,
   ClaimVerifierMode,
   MetricsSnapshot,
   QueryRequest,
   QueryResponse,
 } from "@/lib/types";
+import {
+  buildRunArtifact,
+  copyJsonToClipboard,
+  defaultExportFilename,
+  downloadJson,
+} from "@/lib/traceExport";
 import { cn, formatMs } from "@/lib/utils";
 
 const exampleQuestions = [
@@ -116,6 +127,11 @@ export default function Home() {
   const [response, setResponse] = useState<QueryResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [backpressure, setBackpressure] = useState<{
+    detail?: BackpressureDetail;
+    retryAfterSeconds?: number;
+    message: string;
+  } | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -157,6 +173,7 @@ export default function Home() {
     setLoading(true);
     setStreaming(true);
     setError(null);
+    setBackpressure(null);
     setResponse(emptyStreamingResponse());
 
     const request: QueryRequest = {
@@ -205,8 +222,19 @@ export default function Home() {
       refreshMetrics();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Query failed";
-      setError(message);
+      // 429s come back as a typed ApiError. Surface them through a
+      // dedicated banner instead of the generic error one so the user
+      // sees the retry guidance and the engine-busy framing.
+      if (err instanceof ApiError && err.status === 429) {
+        setBackpressure({
+          detail: err.backpressure,
+          retryAfterSeconds: err.retryAfterSeconds,
+          message: err.message,
+        });
+      } else {
+        const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Query failed";
+        setError(message);
+      }
       // The streaming placeholder we set at submit-start would otherwise stay
       // on screen as a hollow "Grounded Answer" card alongside the error.
       setResponse(null);
@@ -302,6 +330,19 @@ export default function Home() {
             />
           </form>
 
+          {backpressure ? (
+            <BackpressureBanner
+              detail={backpressure.detail}
+              retryAfterSeconds={backpressure.retryAfterSeconds}
+              message={backpressure.message}
+              onRetry={() => {
+                setBackpressure(null);
+                void submit();
+              }}
+              onDismiss={() => setBackpressure(null)}
+            />
+          ) : null}
+
           {error ? (
             <div className="rounded-lg border border-danger/40 bg-danger/10 p-4 text-sm">
               <div className="flex items-start gap-2 font-medium text-danger">
@@ -331,9 +372,14 @@ export default function Home() {
                 </div>
               </div>
               {response && !streaming && response.trace_id ? (
-                <div className="flex flex-wrap gap-2 text-xs text-muted">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
                   <span className="rounded-full border px-2 py-1">Trace {response.trace_id.slice(0, 10)}</span>
                   <span className="rounded-full border px-2 py-1">{formatMs(response.total_duration_ms)}</span>
+                  <ExportButtons
+                    question={question}
+                    bypassCache={bypassCache}
+                    response={response}
+                  />
                 </div>
               ) : null}
             </div>
@@ -646,6 +692,79 @@ function OverridePicker({
   );
 }
 
+function BackpressureBanner({
+  detail,
+  retryAfterSeconds,
+  message,
+  onRetry,
+  onDismiss,
+}: {
+  detail?: BackpressureDetail;
+  retryAfterSeconds?: number;
+  message: string;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const initial = retryAfterSeconds ?? 0;
+  const [remaining, setRemaining] = useState(initial);
+
+  useEffect(() => {
+    setRemaining(initial);
+    if (initial <= 0) return;
+    const id = window.setInterval(() => {
+      setRemaining((v) => (v <= 1 ? 0 : v - 1));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [initial]);
+
+  const ready = remaining <= 0;
+
+  return (
+    <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2 font-medium text-warning">
+          <Timer size={17} className="mt-0.5 shrink-0" />
+          Engine busy
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-subtle hover:text-[var(--color-fg)] text-xs"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+      <p className="mt-2 text-muted">
+        {detail ? (
+          <>
+            The {detail.kind} limiter is full ({detail.in_flight}/{detail.limit}{" "}
+            in flight). New requests are being rejected to keep latency
+            bounded.
+          </>
+        ) : (
+          message
+        )}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={!ready}
+          className="bg-elev hover:border-strong inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {ready ? "Retry now" : `Retry in ${remaining}s`}
+        </button>
+        {retryAfterSeconds !== undefined && (
+          <span className="text-subtle font-mono text-[11px]">
+            Retry-After: {retryAfterSeconds}s
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ScoreBar({ label, value }: { label: string; value: number }) {
   return (
     <div>
@@ -656,6 +775,79 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-sunken">
         <div className="h-full bg-accent transition-all" style={{ width: `${Math.max(4, Math.min(100, value * 100))}%` }} />
       </div>
+    </div>
+  );
+}
+
+/** Copy-to-clipboard + download-JSON buttons for the current run. Renders
+ *  inline alongside the trace-id and duration chips so the export controls
+ *  live next to the artefacts they describe. */
+function ExportButtons({
+  question,
+  bypassCache,
+  response,
+}: {
+  question: string;
+  bypassCache: boolean;
+  response: QueryResponse;
+}) {
+  const [justCopied, setJustCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+
+  async function onCopy() {
+    const artifact = buildRunArtifact(question, bypassCache, response);
+    const ok = await copyJsonToClipboard(artifact);
+    if (ok) {
+      setCopyError(false);
+      setJustCopied(true);
+      window.setTimeout(() => setJustCopied(false), 1400);
+    } else {
+      setCopyError(true);
+      window.setTimeout(() => setCopyError(false), 2000);
+    }
+  }
+
+  function onDownload() {
+    const artifact = buildRunArtifact(question, bypassCache, response);
+    downloadJson(defaultExportFilename(response), artifact);
+  }
+
+  return (
+    <div className="inline-flex overflow-hidden rounded-full border">
+      <button
+        type="button"
+        onClick={onCopy}
+        title={
+          copyError
+            ? "Clipboard unavailable"
+            : justCopied
+              ? "Copied"
+              : "Copy run as JSON"
+        }
+        aria-label="Copy run as JSON"
+        className="text-muted hover:bg-sunken inline-flex h-7 items-center gap-1 px-2 transition-colors"
+        style={
+          copyError
+            ? { color: "var(--color-danger)" }
+            : justCopied
+              ? { color: "var(--color-success)" }
+              : undefined
+        }
+      >
+        {justCopied ? <Check size={12} /> : <Copy size={12} />}
+        <span className="text-[11px]">{justCopied ? "Copied" : "Copy"}</span>
+      </button>
+      <span className="border-l" aria-hidden />
+      <button
+        type="button"
+        onClick={onDownload}
+        title="Download run as .json"
+        aria-label="Download run as JSON"
+        className="text-muted hover:bg-sunken inline-flex h-7 items-center gap-1 px-2 transition-colors"
+      >
+        <Download size={12} />
+        <span className="text-[11px]">JSON</span>
+      </button>
     </div>
   );
 }
